@@ -1,0 +1,788 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth Models (NextAuth) ───────────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── User ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(cuid())
+  name          String?
+  email         String?  @unique
+  emailVerified DateTime?
+  image         String?
+  username      String?  @unique
+  bio           String?
+  role          UserRole @default(GUEST)
+  trustScore    Int      @default(0)
+  isBanned      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  accounts         Account[]
+  sessions         Session[]
+  submissions      Submission[]
+  verifications    Verification[]
+  trustEvents      TrustEvent[]
+  auditLogs        AuditLog[]
+  comments         Comment[]
+  duplicateReports DuplicateReport[]
+  changeRequestsMade     ChangeRequest[] @relation("ChangeRequestRequester")
+  changeRequestsReviewed ChangeRequest[] @relation("ChangeRequestReviewer")
+  baseRomsSubmitted      BaseRom[]       @relation("BaseRomSubmittedBy")
+  baseRomsApproved       BaseRom[]       @relation("BaseRomApprovedBy")
+}
+
+enum UserRole {
+  GUEST
+  CONTRIBUTOR
+  VERIFIER
+  ADMINISTRATOR
+}
+
+// ─── Submission ───────────────────────────────────────────────────────────────
+
+model Submission {
+  id                String           @id @default(cuid())
+  hackName          String
+  version           String
+  // What changed/was added in THIS specific version, as free text — e.g.
+  // "Fixed the softlock in World 3, rebalanced the final boss." Deliberately
+  // NOT in SHARED_FIELD_KEYS (src/lib/hackFamily.ts) and never will be — by
+  // definition this describes what's DIFFERENT about this one version, so
+  // it should never sync to siblings, same reasoning as `version` itself
+  // being excluded from that list.
+  versionChangelog  String?          @db.Text
+  // Which language(s) this hack was translated into, e.g. ["es", "fr"] —
+  // only meaningful alongside a Translation-family tag (see
+  // TRANSLATION_TRIGGER_SLUGS in src/lib/tags.ts, which decides when the
+  // UI shows the language picker at all). Per-version, like
+  // versionChangelog above — deliberately NOT in SHARED_FIELD_KEYS
+  // (src/lib/hackFamily.ts): one version of a hack might add a
+  // translation an earlier version never had, so this should never
+  // silently sync across siblings.
+  translationLanguages String[]      @default([])
+  description       String?          @db.Text
+  author            String?
+  // Year-only precision, e.g. "we know it's 2003 but not the exact date."
+  // Kept indefinitely as the fallback for anything that only has this —
+  // NEVER backfilled/fabricated onto releaseDate below. See releaseDate's
+  // own comment for the full month/day/year field.
+  releaseYear       Int?
+  // Full release date, when it's actually known — separate from
+  // releaseYear above rather than replacing it, specifically so the
+  // ~3,565+ pre-existing submissions that only ever had a year don't need
+  // an invented month/day to migrate cleanly (no data transformation in
+  // this migration at all, purely an ADD COLUMN). @db.Date (not the
+  // default DateTime/timestamp) because this is a calendar date with no
+  // meaningful time-of-day — a plain timestamp column here would risk the
+  // classic "displays as the wrong day" bug depending on server/client
+  // timezone. Whenever this is set, releaseYear above is kept in sync
+  // (auto-derived, see resolveReleaseFields() in src/lib/hackFamily.ts) so
+  // anything that still only reads releaseYear keeps working.
+  releaseDate       DateTime?        @db.Date
+  platform          Platform
+  sourceUrl         String?
+  filename          String
+  fileSize          BigInt
+  crc32             String
+  md5               String
+  sha1              String
+  patchType         PatchType?
+  patchFilename     String?
+  patchSha1         String?
+  // Reference to the UNPATCHED source ROM this hack's patch expects to be
+  // applied against — different from crc32/md5/sha1 above, which hash the
+  // finished/patched ROM this submission is actually about. Helps people
+  // verify they've got the right base rom before patching (wrong base rom
+  // in → broken/corrupted result out).
+  // NOT free text — points at a proper BaseRom row (hash-verified, and
+  // either admin-approved or awaiting review), so different submissions of
+  // the same hack, and different hacks against the same game, all share
+  // ONE canonical record instead of each retyping their own possibly-wrong
+  // description. REQUIRED for every submission going forward (enforced in
+  // the API/form, not the database) — nullable here ONLY so pre-existing
+  // rows from before this system existed don't need a fabricated value;
+  // don't treat null as an acceptable state for anything created after this
+  // field was added. See src/lib/baseRom.ts.
+  baseRomId         String?
+  baseRom           BaseRom?         @relation(fields: [baseRomId], references: [id])
+  notes             String?          @db.Text
+  releasePageUrl    String?
+  githubUrl         String?
+  status            SubmissionStatus @default(PENDING)
+  verificationScore Float            @default(0)
+  submittedById     String
+  submittedBy       User             @relation(fields: [submittedById], references: [id])
+  datImportId       String?
+  datImport         DatImport?       @relation(fields: [datImportId], references: [id])
+  gameMappingId     String?
+  gameMapping       GameMapping?     @relation(fields: [gameMappingId], references: [id])
+  // Groups this submission together with other versions of the same hack
+  // (same name, same platform) — see HackFamily below. Nullable so existing
+  // rows survive until the backfill runs; every new submission gets one.
+  hackFamilyId      String?
+  hackFamily        HackFamily?      @relation(fields: [hackFamilyId], references: [id])
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  // Soft delete — deliberately separate from `status`. REJECTED means "a
+  // reviewer looked at this and it didn't qualify"; deletedAt means "an
+  // admin hid this from public view" (bad submission, abuse, DMCA, etc).
+  // Conflating the two (the old DELETE handler just set status=REJECTED)
+  // lost the distinction and made deleted items indistinguishable from
+  // ordinary rejections, with no way to restore.
+  deletedAt         DateTime?
+  deletedById       String?
+
+  verifications    Verification[]
+  screenshots      Screenshot[]
+  auditLogs        AuditLog[]
+  comments         Comment[]
+  duplicateReports DuplicateReport[] @relation("DuplicateSubmission")
+  duplicateOf      DuplicateReport[] @relation("OriginalSubmission")
+  approvedEntry    ApprovedEntry?
+  tags             SubmissionTag[]
+  changeRequests   ChangeRequest[]
+
+  @@index([sha1])
+  @@index([md5])
+  @@index([crc32])
+  @@index([status])
+  @@index([hackName])
+  @@index([datImportId])
+  @@index([platform])
+  @@index([gameMappingId])
+  @@index([deletedAt])
+  @@index([hackFamilyId])
+  @@index([baseRomId])
+}
+
+enum SubmissionStatus {
+  PENDING
+  COMMUNITY_VERIFIED
+  RECOMMENDED
+  APPROVED
+  REJECTED
+  DISPUTED
+}
+
+enum PatchType {
+  IPS
+  BPS
+  UPS
+  XDELTA
+  PPF
+  APS
+}
+
+enum Platform {
+  // Nintendo handhelds
+  GB
+  GBC
+  GBA
+  NDS
+  N3DS
+  // Nintendo home consoles
+  NES
+  SNES
+  N64
+  GCN
+  WII
+  WIIU
+  SWITCH
+  // Nintendo portables (older)
+  VIRTUALBOY
+  // Sega handhelds
+  GG
+  // Sega home consoles
+  SMS
+  GENESIS
+  SCD
+  S32X
+  SAT
+  DC
+  // Sony handhelds
+  PSP
+  PSVITA
+  // Sony home consoles
+  PS1
+  PS2
+  PS3
+  // Microsoft
+  XBOX
+  XBOX360
+  // Atari
+  ATARI2600
+  ATARI7800
+  JAGUAR
+  LYNX
+  // SNK
+  NEOGEO
+  NGPC
+  // NEC
+  PCENGINE
+  PC88
+  PC98
+  // Commodore / Home computers
+  C64
+  AMIGA
+  // Arcade
+  ARCADE
+  // PC
+  DOS
+  WINDOWS
+  // Other / catch-all
+  OTHER
+}
+
+// ─── Hack Families ────────────────────────────────────────────────────────────
+// Groups multiple Submissions that are different VERSIONS of the same hack
+// (e.g. "Kaizo Star Revenge 1" v1.0, v1.01, v1.02...) so they can be browsed
+// together and keep shared fields (name, author, releaseYear, releaseDate,
+// description, tags) in sync. Deliberately NOT the same thing as GameMapping — GameMapping
+// links a submission to Hasheous/IGDB/etc's external record for that exact
+// file hash, which different versions of a fan hack won't reliably share
+// (they're different files, and Hasheous's own signature DB rarely knows
+// about fan hacks at all). This is a purely internal grouping, keyed on the
+// hack's name, that HackHash fully controls.
+//
+// `name`/`nameKey` are kept in sync with every member Submission's hackName
+// via propagation-on-write (see src/lib/hackFamily.ts) rather than the other
+// way around — Submission.hackName etc. remain the values every other part
+// of the app already reads (search, exports, browse pages); only the WRITE
+// paths (submission create, admin edit, change-request approval) know about
+// families and fan changes out to every member. `nameKey` is the normalized
+// (lowercased, punctuation-stripped) form of `name`, used for exact-match
+// grouping and to enforce one family per name+platform.
+model HackFamily {
+  id          String       @id @default(cuid())
+  name        String
+  nameKey     String
+  platform    Platform
+  author      String?
+  releaseYear Int?
+  releaseDate DateTime?    @db.Date
+  description String?      @db.Text
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  submissions Submission[]
+  dismissedAsA DismissedFamilyPair[] @relation("DismissedPairA")
+  dismissedAsB DismissedFamilyPair[] @relation("DismissedPairB")
+
+  @@unique([nameKey, platform])
+  @@index([platform])
+}
+
+// A confirmed "these are NOT the same hack" decision on a pair the
+// duplicate-finder (findDuplicateFamilyCandidates in src/lib/hackFamily.ts)
+// flagged as similar-looking. Excludes that pair from future duplicate
+// scans. familyAId is always the lexicographically smaller of the two IDs
+// (normalized on write — see dismissDuplicatePair) so a pair can't be
+// stored twice in reversed order and slip past the unique constraint.
+// onDelete: Cascade on both sides — if either family is later deleted (e.g.
+// via a merge), a dismissal referencing it is meaningless and should go too.
+model DismissedFamilyPair {
+  id            String     @id @default(cuid())
+  familyAId     String
+  familyA       HackFamily @relation("DismissedPairA", fields: [familyAId], references: [id], onDelete: Cascade)
+  familyBId     String
+  familyB       HackFamily @relation("DismissedPairB", fields: [familyBId], references: [id], onDelete: Cascade)
+  dismissedAt   DateTime   @default(now())
+  dismissedById String?
+
+  @@unique([familyAId, familyBId])
+}
+
+// ─── Base ROMs ─────────────────────────────────────────────────────────────────
+// A canonical, hash-verified reference to an UNPATCHED source ROM that a
+// hack's patch expects to be applied against — shared across every
+// Submission that uses it (many hacks target the same base game/region;
+// even one hack's own different versions often share the same base rom),
+// rather than each submission carrying its own free-text guess. Submitters
+// either pick an existing APPROVED one or hash their own copy client-side
+// (same single-pass CRC32/MD5/SHA-1 approach as the hack ROM itself, see
+// ROMProcessor.tsx — the base rom file itself is never uploaded, same
+// privacy guarantee) to propose a new one, which starts PENDING until an
+// admin reviews it. A Submission can link to a PENDING BaseRom (doesn't
+// block submitting the hack while the base rom itself awaits review) —
+// see src/lib/baseRom.ts for the resolve-or-create logic both the submit
+// form and the DAT importer use.
+enum BaseRomStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model BaseRom {
+  id              String        @id @default(cuid())
+  platform        Platform
+  name            String
+  crc32           String
+  md5             String
+  sha1            String        @unique
+  status          BaseRomStatus @default(PENDING)
+  submittedById   String?
+  submittedBy     User?         @relation("BaseRomSubmittedBy", fields: [submittedById], references: [id])
+  approvedById    String?
+  approvedBy      User?         @relation("BaseRomApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  rejectionReason String?
+  createdAt       DateTime      @default(now())
+
+  submissions     Submission[]
+
+  @@index([platform])
+  @@index([status])
+}
+
+// ─── Verification ─────────────────────────────────────────────────────────────
+
+model Verification {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id])
+  userId       String
+  user         User       @relation(fields: [userId], references: [id])
+  matches      Boolean
+  isManualVote Boolean    @default(false)
+  sha1Matched  Boolean?
+  md5Matched   Boolean?
+  crc32Matched Boolean?
+  notes        String?
+  weight       Float
+  createdAt    DateTime   @default(now())
+
+  @@unique([submissionId, userId])
+  @@index([submissionId])
+}
+
+// ─── Approved Entry ───────────────────────────────────────────────────────────
+
+model ApprovedEntry {
+  id           String     @id @default(cuid())
+  submissionId String     @unique
+  submission   Submission @relation(fields: [submissionId], references: [id])
+  machineName  String     @unique
+  description  String
+  romName      String
+  platform     Platform
+  fileSize     BigInt
+  crc32        String
+  md5          String
+  sha1         String
+  datVersion   String     @default("1.0")
+  approvedById String
+  approvedAt   DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([sha1])
+  @@index([machineName])
+  @@index([platform])
+}
+
+// ─── Trust System ─────────────────────────────────────────────────────────────
+
+model TrustEvent {
+  id          String         @id @default(cuid())
+  userId      String
+  user        User           @relation(fields: [userId], references: [id])
+  eventType   TrustEventType
+  delta       Int
+  reason      String
+  relatedId   String?
+  createdAt   DateTime       @default(now())
+
+  @@index([userId])
+}
+
+enum TrustEventType {
+  SUBMISSION_APPROVED
+  SUBMISSION_REJECTED
+  CORRECT_VERIFICATION
+  FALSE_VERIFICATION
+  DUPLICATE_FOUND
+  SPAM
+  ABUSE
+  ADMIN_ADJUSTMENT
+}
+
+// ─── Audit Log ────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id           String      @id @default(cuid())
+  action       String
+  details      Json
+  userId       String?
+  user         User?       @relation(fields: [userId], references: [id])
+  submissionId String?
+  submission   Submission? @relation(fields: [submissionId], references: [id])
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime    @default(now())
+
+  @@index([submissionId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ─── Duplicate Report ─────────────────────────────────────────────────────────
+
+model DuplicateReport {
+  id            String        @id @default(cuid())
+  submissionId  String
+  submission    Submission    @relation("DuplicateSubmission", fields: [submissionId], references: [id])
+  duplicateOfId String?
+  original      Submission?   @relation("OriginalSubmission", fields: [duplicateOfId], references: [id])
+  userId        String
+  user          User          @relation(fields: [userId], references: [id])
+  duplicateType DuplicateType
+  notes         String?
+  resolved      Boolean       @default(false)
+  createdAt     DateTime      @default(now())
+
+  @@index([submissionId])
+}
+
+enum DuplicateType {
+  SAME_ROM_DIFFERENT_FILENAME
+  SAME_ROM_DIFFERENT_VERSION
+  DIFFERENT_ROM
+}
+
+// ─── Screenshots ──────────────────────────────────────────────────────────────
+
+model Screenshot {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id])
+  url          String
+  caption      String?
+  createdAt    DateTime   @default(now())
+}
+
+// ─── Comments ─────────────────────────────────────────────────────────────────
+
+model Comment {
+  id           String     @id @default(cuid())
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id])
+  userId       String
+  user         User       @relation(fields: [userId], references: [id])
+  content      String     @db.Text
+  isDeleted    Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([submissionId])
+}
+
+// ─── Tags ─────────────────────────────────────────────────────────────────────
+
+// Simple vs. Advanced tag modes — see src/lib/tags.ts (ALL_TAGS is the
+// single source of truth for name/tier/description/group; this table is
+// kept in sync with it via ensureTagsExist(), the same self-healing
+// upsert pattern already used for tag creation, now extended to also
+// reconcile metadata on every resolve instead of only creating missing
+// rows). SIMPLE tags are the small, friendly set shown by default;
+// ADVANCED tags are the fuller Europia79/IUPAG-inspired breakdown for
+// people who want to tag something more specifically (e.g. "this only
+// touches the music"). description is shown as a hover tooltip in the UI.
+// tagGroup organizes ADVANCED-tier tags into sections in the picker — left
+// null for SIMPLE tags, which always render as one flat row regardless.
+// Named tagGroup rather than the bare "group" specifically because GROUP
+// is a reserved SQL keyword — Prisma quotes identifiers safely either way,
+// but this sidesteps the landmine for any future hand-written raw SQL.
+model Tag {
+  id          String          @id @default(cuid())
+  name        String          @unique
+  slug        String          @unique
+  tier        TagTier         @default(ADVANCED)
+  description String?
+  tagGroup    String?
+  submissions SubmissionTag[]
+}
+
+enum TagTier {
+  SIMPLE
+  ADVANCED
+}
+
+model SubmissionTag {
+  submissionId String
+  submission   Submission @relation(fields: [submissionId], references: [id])
+  tagId        String
+  tag          Tag        @relation(fields: [tagId], references: [id])
+
+  @@id([submissionId, tagId])
+}
+
+// ─── DAT Import History ─────────────────────────────────────────────────────
+
+model DatImport {
+  id                String    @id @default(cuid())
+  filename          String
+  fileSizeBytes     Int?
+  platform          Platform
+  note              String?
+  totalParsed       Int       @default(0)
+  importedCount     Int       @default(0)
+  skippedDuplicates Int       @default(0)
+  errorCount        Int       @default(0)
+  // Array of { machineName, sha1, reason } for everything that did NOT get
+  // imported — duplicates and per-row errors alike. Drives the downloadable log.
+  skippedLog        Json      @default("[]")
+  importedById      String
+  reversed          Boolean   @default(false)
+  reversedAt        DateTime?
+  reversedById      String?
+  createdAt         DateTime  @default(now())
+
+  submissions       Submission[]
+
+  @@index([createdAt])
+}
+
+// ─── Change Requests ────────────────────────────────────────────────────────
+
+model ChangeRequest {
+  id            String              @id @default(cuid())
+  submissionId  String
+  submission    Submission          @relation(fields: [submissionId], references: [id])
+  requestedById String
+  requestedBy   User                @relation("ChangeRequestRequester", fields: [requestedById], references: [id])
+  // Proposed field changes, e.g. { "hackName": "New Title", "author": "New Author" }
+  // — only the fields actually being changed are present.
+  changes       Json
+  // Whether hackName/author/releaseYear/releaseDate/description/tags changes
+  // here should fan out to every other version of this hack (HackFamily) on approval, or
+  // apply only to this one submission. Set by the requester at proposal time;
+  // the approve action just honors it — see src/lib/hackFamily.ts.
+  applyToAllVersions Boolean        @default(true)
+  // Proposed tag slugs — full-replace semantics on approval, same as the
+  // direct-edit PATCH route's tags handling. Separate from `changes` above
+  // since changes is scalar-field-only (Prisma Json can hold an array fine,
+  // but keeping this as its own typed-in-spirit field, alongside
+  // applyToAllVersions, matches how that field was added rather than
+  // overloading `changes` with a non-scalar value). null = no tag change
+  // proposed (leave as-is); [] = explicitly propose clearing all tags —
+  // these are different things, so this is nullable rather than
+  // defaulting to an empty array.
+  proposedTags  Json?
+  // Proposed translationLanguages, e.g. ["es","fr"] — same null-vs-present
+  // idea as proposedTags (null = no change proposed; [] = explicitly
+  // propose clearing). Per-version like the field itself, so this is
+  // deliberately NEVER propagated via propagateSharedFields/propagateTags
+  // on approval, unlike proposedTags/proposedFamily above. Currently only
+  // ever populated by the duplicate-hash-resubmission path in
+  // SubmitForm.tsx (see EDITABLE_FIELDS gap note in src/lib/hackFamily.ts
+  // comments) — the manual "propose a change" form has no picker for this,
+  // same asymmetry proposedTags already has.
+  proposedTranslationLanguages Json?
+  // Proposed hack-family reassignment. null = no family change proposed
+  // (leave as-is); a present object with id: null explicitly proposes
+  // detaching from any family — same null-vs-present distinction as
+  // proposedTags above, just against a single nullable id instead of an
+  // array. Shape when present: { id: string | null, name: string | null }
+  // — name is a display-only snapshot (for rendering the pending request
+  // without an extra join); the actual reassignment at approval time
+  // re-validates against the live HackFamily row by id, never trusts this
+  // snapshot for anything but display. See reassignSubmissionFamily() in
+  // src/lib/hackFamily.ts.
+  proposedFamily Json?
+  reason        String?             @db.Text
+  status        ChangeRequestStatus @default(PENDING)
+  reviewedById  String?
+  reviewedBy    User?               @relation("ChangeRequestReviewer", fields: [reviewedById], references: [id])
+  reviewedAt    DateTime?
+  reviewNote    String?
+  createdAt     DateTime            @default(now())
+
+  @@index([submissionId])
+  @@index([status])
+}
+
+enum ChangeRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ─── Game Mappings ────────────────────────────────────────────────────────────
+// One GameMapping can be shared across many Submissions (different versions of
+// the same hack). This is how "related" entries work — they all link to the
+// same GameMapping, so you can find all the hashes in one place.
+
+model GameMapping {
+  id                    String    @id @default(cuid())
+
+  // Canonical metadata — admin-editable, can be pulled from IGDB or other
+  // sources to replace the user-submitted hackName/releaseYear/description
+  canonicalName         String?
+  canonicalReleaseDate  DateTime?
+  canonicalDescription  String?   @db.Text
+
+  // External database IDs/URLs
+  // Accepts either a full URL or just the numeric/slug ID — the UI strips
+  // URLs to IDs automatically so they're stored consistently.
+  epicGamesId           String?
+  gogId                 String?
+  giantBombId           String?
+  igdbId                String?
+  // IGDB's numeric ID doesn't resolve to a working igdb.com URL on its own —
+  // the site's game pages are keyed by text slug. Extracted from the IGDB
+  // entry in hasheousLinks below (Hasheous resolves the slug server-side);
+  // if it's null, the UI falls back to a non-clickable ID display instead
+  // of a broken link.
+  igdbSlug              String?
+  launchboxId           String?
+  retroAchievementsId   String?
+  screenScraperId       String?
+  steamId               String?
+  steamGridDBId         String?
+  theGamesDBId          String?
+  wikipediaUrl          String?
+
+  // Ready-to-use links Hasheous itself computed server-side per source
+  // (its Lookup/ByHash metadata[].link field), keyed by source name, e.g.
+  // {"GiantBomb": "https://www.giantbomb.com/games/3030-44054/"}. Added
+  // because hand-rolling our own per-source URL template from a raw ID has
+  // repeatedly drifted from the real convention (GiantBomb needs a
+  // "3030-" object-type prefix Hasheous adds internally that our own old
+  // template didn't — confirmed against Hasheous's own LinkBuilder source,
+  // not guessed). The UI prefers this when present and only falls back to
+  // its own template for IDs that predate this field or were entered
+  // manually. Not populated for every source — only ones Hasheous itself
+  // builds a template for (see hasheous.ts's extractMappings).
+  hasheousLinks         Json?
+
+  // Hasheous sync tracking (PULL — do we have Hasheous's data for this hash)
+  hasheousId             String?
+  hasheousEnv            String?    // 'beta' | 'production' — which env the sync happened against
+  hasheousSyncedAt      DateTime?
+  hasheousSyncStatus    String?    // 'ok' | 'error' | 'pending'
+  hasheousSyncError     String?
+
+  // Push verification tracking (PUSH — did what we SENT actually take on
+  // Hasheous's end). Separate from the sync fields above on purpose: a
+  // submission can be fully synced (we have Hasheous's data) while a more
+  // recent push of OUR data to them is still unconfirmed — these track that
+  // independently. Hasheous's own processing can take up to ~24h, so
+  // "pushed successfully" (we got a 200 back) and "confirmed" (a later pull
+  // shows Hasheous now reflects it) are deliberately different states; see
+  // src/lib/hasheousSync.ts for how "pending" transitions to "confirmed" or
+  // "not_reflected".
+  hasheousPushedAt        DateTime?
+  hasheousPushedFields    Json?      // snapshot of exactly what was sent, to compare against on the next pull
+  hasheousPushStatus      String?    // 'pending' | 'confirmed' | 'not_reflected'
+  hasheousPushVerifiedAt  DateTime?
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  submissions           Submission[]
+
+  @@index([igdbId])
+  @@index([theGamesDBId])
+  @@index([steamId])
+  @@index([hasheousSyncStatus])
+  @@index([hasheousPushStatus])
+}
+
+// ─── Hasheous Sync Job History ───────────────────────────────────────────────
+// Persistent record of every pull/push run — manual (from the admin page) or
+// scheduled (syncScheduler.ts). Previously this only lived in an in-memory
+// jobStore (pull only — push had no record at all), which meant it vanished
+// on server restart and gave no visibility into scheduler activity. This
+// table is written on top of jobStore, not instead of it — jobStore still
+// drives the live-polling progress bar for an in-flight manual pull.
+
+model SyncJob {
+  id            String    @id @default(cuid())
+  direction     SyncDirection
+  env           String
+  status        SyncJobStatus @default(RUNNING)
+  triggeredBy   SyncTrigger
+  userId        String?   // null for scheduler-triggered runs
+  total         Int       @default(0)
+  processed     Int       @default(0)
+  found         Int       @default(0)   // pull: matched in Hasheous
+  updated       Int       @default(0)   // pull: found with new mapping data applied
+  notFound      Int       @default(0)   // pull: no match in Hasheous
+  pushed        Int       @default(0)   // push: successfully pushed
+  skipped       Int       @default(0)   // push: no mapping data to send
+  failed        Int       @default(0)   // push: Hasheous rejected/errored
+  errorMessage  String?
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+
+  @@index([startedAt])
+  @@index([direction])
+}
+
+enum SyncDirection {
+  PULL
+  PUSH
+}
+
+enum SyncJobStatus {
+  RUNNING
+  DONE
+  ERROR
+}
+
+enum SyncTrigger {
+  MANUAL
+  SCHEDULER
+}
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+
+model SiteSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+}

@@ -1,0 +1,60 @@
+# portainer-stack.yml
+#
+# Use this file when deploying via Portainer's Stacks > Web editor.
+#
+# Why this is a separate file from docker-compose.yml: Portainer's Web editor
+# only receives this YAML text — it does NOT have access to your actual
+# Dockerfile or source code, so a `build: .` line fails there with an
+# "unable to prepare context" error. This version instead points at an
+# image you build yourself first (see DOCKER_PORTAINER_GUIDE.md, Step 4),
+# which sidesteps that limitation entirely.
+#
+# Your existing docker-compose.yml is untouched and still works exactly as
+# before for plain `docker compose up --build` on the command line.
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: romhackdat
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      # Postgres 18+ moved its expected data location from
+      # /var/lib/postgresql/data to /var/lib/postgresql — see docker-compose.yml
+      # for the full explanation.
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  app:
+    image: hackhash:latest
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Host port 3001 (not 3000) so this test stack can run alongside
+      # anything else already using 3000 — the app still listens on 3000
+      # inside its own container, only the host-side mapping changed.
+      - "3001:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/romhackdat
+      NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL in the stack's environment variables}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in the stack's environment variables}
+      AUTH_TRUST_HOST: "true"
+      GITHUB_ID: ${GITHUB_ID:?Set GITHUB_ID in the stack's environment variables}
+      GITHUB_SECRET: ${GITHUB_SECRET:?Set GITHUB_SECRET in the stack's environment variables}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+      HASHEOUS_API_KEY: ${HASHEOUS_API_KEY:-}
+      HASHEOUS_ENV: ${HASHEOUS_ENV:-beta}
+
+volumes:
+  db-data:

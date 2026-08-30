@@ -1,0 +1,57 @@
+services:
+  db:
+    image: postgres:18-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: romhackdat
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      # Postgres 18+ changed where it expects its data: the official image's
+      # own volume mount point moved from /var/lib/postgresql/data to
+      # /var/lib/postgresql (it manages a version-specific subfolder itself
+      # underneath that, e.g. 18/docker) — mounting at the old /data path
+      # makes the container refuse to start on 18+.
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      # Gives a fresh container time to initialize its data directory on
+      # first boot before failed checks start counting toward "unhealthy" —
+      # without this, a slower first boot can get marked unhealthy before
+      # Postgres has even finished starting up.
+      start_period: 30s
+    # Not published to the host by default — the app reaches it via the
+    # internal "db" service name. Uncomment if you need direct host access
+    # (e.g. to point a GUI client at it):
+    # ports:
+    #   - "5432:5432"
+
+  app:
+    build: .
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/romhackdat
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env}
+      # Same reasoning as the LAN-access setup outside Docker: without this,
+      # sign-in breaks for anyone reaching the app via anything other than
+      # exactly NEXTAUTH_URL.
+      AUTH_TRUST_HOST: "true"
+      GITHUB_ID: ${GITHUB_ID:?Set GITHUB_ID in .env}
+      GITHUB_SECRET: ${GITHUB_SECRET:?Set GITHUB_SECRET in .env}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+      HASHEOUS_API_KEY: ${HASHEOUS_API_KEY:-}
+      HASHEOUS_ENV: ${HASHEOUS_ENV:-beta}
+
+volumes:
+  db-data:
