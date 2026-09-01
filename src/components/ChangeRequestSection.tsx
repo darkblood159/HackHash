@@ -11,6 +11,7 @@ import { PLATFORMS, PLATFORM_LABELS } from '@/types';
 import { MappingsSection, type MappingValues } from './MappingsSection';
 import { MAPPING_FIELD_KEYS } from '@/lib/mappingFields';
 import { FamilyPicker, type SelectedFamily } from './FamilyPicker';
+import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
 import { TagsEditor } from './TagsEditor';
 import { LanguagePicker } from './LanguagePicker';
 import { TRANSLATION_TRIGGER_SLUGS } from '@/lib/tags';
@@ -27,6 +28,7 @@ interface ChangeRequest {
   proposedTags?: string[] | null;
   proposedTranslationLanguages?: string[] | null;
   proposedFamily?: { id: string | null; name: string | null } | null;
+  proposedBaseRom?: { id: string; name: string } | null;
   createdAt: string | Date;
   requestedBy: { id: string; name: string | null; image: string | null };
   reviewedBy?: { id: string; name: string | null } | null;
@@ -46,6 +48,7 @@ interface ChangeRequestSectionProps {
   };
   currentMapping?: MappingValues | null;
   currentFamily?: SelectedFamily | null;
+  currentBaseRom?: SelectedBaseRom | null;
   currentTags?: string[]; // current tag slugs
   currentTranslationLanguages?: string[];
   initialRequests: ChangeRequest[];
@@ -56,7 +59,7 @@ interface ChangeRequestSectionProps {
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
 
-export function ChangeRequestSection({ submissionId, current, currentMapping, currentFamily = null, currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions }: ChangeRequestSectionProps) {
+export function ChangeRequestSection({ submissionId, current, currentMapping, currentFamily = null, currentBaseRom = null, currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions }: ChangeRequestSectionProps) {
   const router = useRouter();
   const [requests, setRequests] = useState(initialRequests);
   const [open, setOpen] = useState(false);
@@ -75,6 +78,7 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
   const [releaseYearOnly, setReleaseYearOnly] = useState(!current.releaseDate && !!current.releaseYear);
   const [mappingForm, setMappingForm] = useState<MappingValues>(currentMapping ?? {});
   const [selectedFamily, setSelectedFamily] = useState<SelectedFamily | null>(currentFamily);
+  const [selectedBaseRom, setSelectedBaseRom] = useState<SelectedBaseRom | null>(currentBaseRom);
   const [tagsForm, setTagsForm] = useState<string[]>(currentTags);
   const [translationLanguagesForm, setTranslationLanguagesForm] = useState<string[]>(currentTranslationLanguages);
   const [applyToAllVersions, setApplyToAllVersions] = useState(true);
@@ -118,11 +122,18 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
     }
 
     const familyChanged = (selectedFamily?.id ?? null) !== (currentFamily?.id ?? null);
+    // Same defensive shape as AdminEditPanel.tsx's identical check — never
+    // treat a null/in-progress selection as a proposed change. BaseRomPicker's
+    // "Change" button clears its value mid-pick with no explicit "remove
+    // entirely" affordance, and a base rom can't be proposed-empty the way
+    // family can (see proposedBaseRom's schema comment) — only a real,
+    // completed, actually-different pick counts.
+    const baseRomChanged = !!selectedBaseRom && selectedBaseRom.id !== (currentBaseRom?.id ?? null);
     const tagsChanged = !sameSet(tagsForm, currentTags);
     const translationLanguagesChanged = !sameSet(translationLanguagesForm, currentTranslationLanguages);
 
-    if (Object.keys(changes).length === 0 && !familyChanged && !tagsChanged && !translationLanguagesChanged) {
-      setError('No changes proposed — edit at least one field, change the tags, or pick a different family.');
+    if (Object.keys(changes).length === 0 && !familyChanged && !baseRomChanged && !tagsChanged && !translationLanguagesChanged) {
+      setError('No changes proposed — edit at least one field, change the tags, pick a different family, or pick a different base ROM.');
       return;
     }
 
@@ -137,6 +148,7 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
           reason: reason || undefined,
           applyToAllVersions,
           ...(familyChanged ? { proposedFamily: { id: selectedFamily?.id ?? null, name: selectedFamily?.name ?? null } } : {}),
+          ...(baseRomChanged ? { proposedBaseRom: { id: selectedBaseRom!.id, name: selectedBaseRom!.name } } : {}),
           ...(tagsChanged ? { proposedTags: tagsForm } : {}),
           ...(translationLanguagesChanged ? { proposedTranslationLanguages: translationLanguagesForm } : {}),
         }),
@@ -258,6 +270,11 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
           <MappingsSection values={mappingForm} onChange={setMappingForm} />
 
           <div>
+            <label className="block text-xs text-text-muted mb-1">Base ROM</label>
+            <BaseRomPicker platform={form.platform} value={selectedBaseRom} onChange={setSelectedBaseRom} />
+          </div>
+
+          <div>
             <label className="block text-xs text-text-muted mb-1">Family</label>
             <FamilyPicker
               platform={form.platform}
@@ -335,6 +352,11 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
                     {r.proposedFamily.id ? r.proposedFamily.name : <em className="text-text-muted">remove from family</em>}
                   </p>
                 )}
+                {r.proposedBaseRom !== undefined && r.proposedBaseRom !== null && (
+                  <p className="text-xs text-text-secondary">
+                    <span className="text-text-muted">Base ROM:</span> {r.proposedBaseRom.name}
+                  </p>
+                )}
               </div>
               {r.reason && <p className="text-xs text-text-muted mt-1.5 italic">"{r.reason}"</p>}
               {hasOtherVersions && r.applyToAllVersions !== false && r.status === 'PENDING' && (
@@ -342,6 +364,9 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
               )}
               {r.proposedFamily !== undefined && r.proposedFamily !== null && r.status === 'PENDING' && (
                 <p className="text-xs text-phosphor mt-1">Approving this will also move it to the proposed family, regardless of the setting above.</p>
+              )}
+              {r.proposedBaseRom !== undefined && r.proposedBaseRom !== null && r.status === 'PENDING' && (
+                <p className="text-xs text-phosphor mt-1">Approving this will also switch its base ROM to {r.proposedBaseRom.name}.</p>
               )}
 
               {isAdmin && r.status === 'PENDING' && (

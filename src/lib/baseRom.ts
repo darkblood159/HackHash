@@ -88,3 +88,110 @@ export async function resolveOrCreateBaseRom(
     throw err;
   }
 }
+
+// ─── Reassignment (switching an EXISTING submission's base rom) ───────────────
+//
+// Two entry points, deliberately NOT funneled through one shared "apply"
+// function the way family has (reassignSubmissionFamily) — the two callers
+// need genuinely different write shapes, not just different validation:
+//
+// - The admin/owner direct-edit PATCH route (src/app/api/submissions/[id]/
+//   route.ts) folds baseRomId into its OWN already-in-flight updateData
+//   object, alongside whatever other fields are being saved in the same
+//   request, and applies everything in one tx.submission.update() call —
+//   there's no separate "just the base rom" write to isolate there. That
+//   route calls validateBaseRomAssignment() directly for validation only,
+//   and lets its existing update carry the write.
+// - The change-request approval route DOES need a standalone apply step —
+//   baseRomId was deliberately pulled out of that route's generic `changes`
+//   bag (see EDITABLE_FIELDS in src/app/api/submissions/[id]/change-request/
+//   route.ts) specifically so it gets this validation instead of riding
+//   along unvalidated. reassignSubmissionBaseRom() below is that standalone
+//   step, mirroring reassignSubmissionFamily()'s validate+write+audit-log
+//   shape since that's the only caller that needs exactly that shape.
+//
+// Both share validateBaseRomAssignment() for the actual validation, so the
+// platform-match/status rules only exist in one place either way.
+
+export class BaseRomAssignError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export interface ValidatedBaseRomTarget {
+  id: string;
+  name: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+}
+
+// Validates a proposed base-rom target against the submission's platform
+// and against the base rom's own review status. `client` accepts either
+// the plain top-level `prisma` client (eager pre-checks, no transaction
+// needed for a read-only check) or a `tx` from an open transaction
+// (immediate application) — TxClient is `any` for exactly this reason, see
+// its definition above.
+//
+// PENDING is allowed, not just APPROVED — matching the standard this
+// already holds to at submission-creation time (SubmitForm.tsx / this
+// file's resolveOrCreateBaseRom: a submitter hashing a genuinely new base
+// rom isn't blocked on its review finishing first). REJECTED is the one
+// status that's never a valid target — that status means an admin already
+// looked at this exact entry and said it's wrong.
+export async function validateBaseRomAssignment(
+  client: TxClient,
+  baseRomId: string,
+  submissionPlatform: string
+): Promise<ValidatedBaseRomTarget> {
+  const target = await client.baseRom.findUnique({ where: { id: baseRomId } });
+  if (!target) {
+    throw new BaseRomAssignError('That base ROM no longer exists — please pick a different one.', 404);
+  }
+  if (target.platform !== submissionPlatform) {
+    throw new BaseRomAssignError(
+      `That base ROM is for ${target.platform}, not ${submissionPlatform} — base ROMs are platform-specific.`,
+      422
+    );
+  }
+  if (target.status === 'REJECTED') {
+    throw new BaseRomAssignError('That base ROM was rejected and can\'t be used — please pick a different one.', 422);
+  }
+  return { id: target.id, name: target.name, status: target.status };
+}
+
+export interface BaseRomReassignResult {
+  changed: boolean;
+  targetName: string | null;
+}
+
+// Standalone validate + write + audit-log — see the file-section comment
+// above for why this exists separately from the admin PATCH route's own
+// handling, and isn't shared with it the way reassignSubmissionFamily is
+// shared across its three callers.
+export async function reassignSubmissionBaseRom(
+  tx: TxClient,
+  submission: { id: string; baseRomId: string | null; platform: string },
+  baseRomId: string,
+  actorId: string | null
+): Promise<BaseRomReassignResult> {
+  if (baseRomId === submission.baseRomId) {
+    return { changed: false, targetName: null };
+  }
+
+  const target = await validateBaseRomAssignment(tx, baseRomId, submission.platform);
+
+  await tx.submission.update({ where: { id: submission.id }, data: { baseRomId } });
+
+  await tx.auditLog.create({
+    data: {
+      action: 'SUBMISSION_BASE_ROM_CHANGED',
+      details: { by: actorId, from: submission.baseRomId, to: baseRomId, toName: target.name },
+      userId: actorId,
+      submissionId: submission.id,
+    },
+  });
+
+  return { changed: true, targetName: target.name };
+}

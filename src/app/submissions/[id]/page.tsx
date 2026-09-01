@@ -377,6 +377,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
             }}
             currentMapping={submission.gameMapping as any}
             currentFamily={submission.hackFamily}
+            currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status } : null}
             currentTags={submission.tags.map((t: any) => t.tag.slug)}
             currentTranslationLanguages={submission.translationLanguages}
             initialRequests={submission.changeRequests as any}

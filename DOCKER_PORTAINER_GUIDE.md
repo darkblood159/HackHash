@@ -117,6 +117,8 @@ fix whatever it hits.
 | `INITIAL_ADMIN_EMAIL` | **the email on the GitHub/Discord account you'll sign in with first** — see Step 7 |
 | `HASHEOUS_API_KEY` | only if you're using the Hasheous integration — your Hasheous API key (X-API-Key) |
 | `HASHEOUS_ENV` | only if you're using the Hasheous integration — `production` for the real hasheous.org, `beta` for beta.hasheous.org. **This one is easy to miss and fails silently if you do** — if it's left out, the app defaults to `beta` with no error at all, which means every pull and push quietly talks to a different Hasheous database than the one you're actually looking at. If Hasheous corrections don't seem to "stick," this is the first thing to check. |
+| `UPSTASH_REDIS_REST_URL` | optional, but recommended before going public — REST URL from an Upstash Redis database (free tier at upstash.com). Protects submissions, verification, and search from spam/scraping. **Also fails silently if left out** — same shape of issue as `HASHEOUS_ENV` above: leaving it blank doesn't error, it just leaves those three endpoints completely unlimited. |
+| `UPSTASH_REDIS_REST_TOKEN` | the REST token from the same Upstash database as above — both are required together for rate limiting to actually turn on. |
 
 Added a repo `.env` file for your own local reference doesn't count here —
 Docker never sees it (`.dockerignore` excludes it from the image on

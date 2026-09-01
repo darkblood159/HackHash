@@ -23,6 +23,8 @@
   "dependencies": {
     "@auth/prisma-adapter": "^2.1.0",
     "@prisma/client": "^5.14.0",
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.38.3",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
     "jszip": "^3.10.1",

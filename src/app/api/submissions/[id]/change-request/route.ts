@@ -6,13 +6,13 @@ import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
 import { MAPPING_FIELD_KEYS, stripMappingValues, isMappingFieldKey } from '@/lib/mappingFields';
 import { SHARED_FIELD_KEYS } from '@/lib/hackFamily';
+import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
 import { ALL_TAG_SLUGS } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 
 const EDITABLE_FIELDS = [
   ...SHARED_FIELD_KEYS, 'version', 'versionChangelog', 'sourceUrl', 'platform', 'notes', 'releasePageUrl', 'githubUrl',
   'patchType', 'patchFilename', 'patchSha1',
-  'baseRomId',
   ...MAPPING_FIELD_KEYS,
 ] as const;
 
@@ -68,9 +68,21 @@ const changeRequestSchema = z.object({
     id: z.string().nullable(),
     name: z.string().nullable(),
   }).optional(),
+  // Proposed base-rom reassignment — same display-only-snapshot idea as
+  // proposedFamily, but no null-id "detach" case: a submission's baseRomId
+  // is required at the application level (see the schema comment on
+  // Submission.baseRomId), so this only ever proposes SWITCHING to a
+  // different one. `name` is a snapshot from BaseRomPicker's own search
+  // results — re-validated against the live BaseRom by id below (and again
+  // at approval time, via reassignSubmissionBaseRom in src/lib/baseRom.ts),
+  // never trusted on its own for anything but display.
+  proposedBaseRom: z.object({
+    id: z.string(),
+    name: z.string(),
+  }).optional(),
 }).refine(
-  (data) => Object.keys(data.changes).length > 0 || data.proposedTags !== undefined || data.proposedTranslationLanguages !== undefined || data.proposedFamily !== undefined,
-  { message: 'Propose at least one change — a field edit, a tag change, or a family change' }
+  (data) => Object.keys(data.changes).length > 0 || data.proposedTags !== undefined || data.proposedTranslationLanguages !== undefined || data.proposedFamily !== undefined || data.proposedBaseRom !== undefined,
+  { message: 'Propose at least one change — a field edit, a tag change, a family change, or a base ROM change' }
 );
 
 export async function POST(
@@ -119,6 +131,25 @@ export async function POST(
     }
   }
 
+  // Same courtesy-check-now, re-validate-at-approval-time reasoning as
+  // proposedFamily above — except this one calls the SAME
+  // validateBaseRomAssignment() helper (src/lib/baseRom.ts) that the
+  // approval-time application also uses, rather than duplicating the
+  // platform+status logic inline a second time the way proposedFamily's
+  // check above does. Both ends of this one request/approve pair share one
+  // implementation of "what makes a base rom a valid target."
+  if (parsed.data.proposedBaseRom) {
+    const effectivePlatform = typeof parsed.data.changes.platform === 'string' ? parsed.data.changes.platform : submission.platform;
+    try {
+      await validateBaseRomAssignment(prisma, parsed.data.proposedBaseRom.id, effectivePlatform);
+    } catch (err) {
+      if (err instanceof BaseRomAssignError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
+  }
+
   const changeRequest = await prisma.changeRequest.create({
     data: {
       submissionId: params.id,
@@ -129,6 +160,7 @@ export async function POST(
       proposedTags: parsed.data.proposedTags !== undefined ? (parsed.data.proposedTags as any) : undefined,
       proposedTranslationLanguages: parsed.data.proposedTranslationLanguages !== undefined ? (parsed.data.proposedTranslationLanguages as any) : undefined,
       proposedFamily: parsed.data.proposedFamily !== undefined ? (parsed.data.proposedFamily as any) : undefined,
+      proposedBaseRom: parsed.data.proposedBaseRom !== undefined ? (parsed.data.proposedBaseRom as any) : undefined,
     },
     include: {
       requestedBy: { select: { id: true, name: true, image: true } },
@@ -145,6 +177,7 @@ export async function POST(
         proposedTags: parsed.data.proposedTags,
         proposedTranslationLanguages: parsed.data.proposedTranslationLanguages,
         proposedFamily: parsed.data.proposedFamily,
+        proposedBaseRom: parsed.data.proposedBaseRom,
       },
       userId: session.user.id,
       submissionId: params.id,

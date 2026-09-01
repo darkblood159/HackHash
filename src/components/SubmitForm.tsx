@@ -307,7 +307,6 @@ export function SubmitForm() {
       maybeSet('patchType', form.patchType);
       maybeSet('patchFilename', form.patchFilename);
       maybeSet('patchSha1', form.patchSha1);
-      maybeSet('baseRomId', baseRom?.id ?? '');
       for (const key of MAPPING_FIELD_KEYS) {
         maybeSet(key, form[key as keyof FormState] as string);
       }
@@ -320,6 +319,14 @@ export function SubmitForm() {
             changes,
             proposedTags: form.tags.length > 0 ? form.tags : undefined,
             proposedTranslationLanguages: form.translationLanguages.length > 0 ? form.translationLanguages : undefined,
+            // Same "only if it actually has a value" idea as every field
+            // above (maybeSet), not the diff-against-current idea
+            // ChangeRequestSection/AdminEditPanel use elsewhere — there's
+            // no "current" to diff against in this flow's sense; this is
+            // "everything the submitter picked in this form," proposed
+            // wholesale, whether or not it happens to already match
+            // earlyDuplicate's existing base rom.
+            ...(baseRom ? { proposedBaseRom: { id: baseRom.id, name: baseRom.name } } : {}),
             applyToAllVersions,
             reason: 'Submitted while trying to upload a file that matched an existing entry\'s hash — proposed information for the existing entry instead of a new submission.',
           }),

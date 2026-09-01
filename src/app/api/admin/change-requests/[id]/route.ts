@@ -6,6 +6,7 @@ import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
 import { isMappingFieldKey } from '@/lib/mappingFields';
 import { isSharedFieldKey, propagateSharedFields, propagateTags, reassignSubmissionFamily, FamilyReassignError, resolveReleaseFields } from '@/lib/hackFamily';
+import { reassignSubmissionBaseRom, BaseRomAssignError } from '@/lib/baseRom';
 import { resolveMachineName, triggerHasheousPushForSubmission } from '@/lib/approval';
 import { ensureTagsExist } from '@/lib/tags';
 
@@ -197,6 +198,25 @@ export async function POST(
         );
       }
 
+      // Independent of applyToAllVersions for the same reason family
+      // reassignment is (see the comment just above) — and independent of
+      // hasFamilyChange too, since a request can propose either, both, or
+      // neither. reassignSubmissionBaseRom() re-validates platform+status
+      // against the submission's CURRENT state (which may itself have just
+      // changed a few lines above, if this same request also proposed a
+      // platform change), not what was in effect back when the request was
+      // first proposed and eagerly checked.
+      const hasBaseRomChange = changeRequest.proposedBaseRom !== null && changeRequest.proposedBaseRom !== undefined;
+      if (hasBaseRomChange) {
+        const proposed = changeRequest.proposedBaseRom as { id: string; name: string };
+        await reassignSubmissionBaseRom(
+          tx,
+          { id: changeRequest.submissionId, baseRomId: updated.baseRomId, platform: updated.platform },
+          proposed.id,
+          session.user.id
+        );
+      }
+
       await tx.changeRequest.update({
         where: { id: params.id },
         data: { status: 'APPROVED', reviewedById: session.user.id, reviewedAt: new Date(), reviewNote },
@@ -210,6 +230,7 @@ export async function POST(
             proposedTags: changeRequest.proposedTags,
             proposedTranslationLanguages: changeRequest.proposedTranslationLanguages,
             proposedFamily: changeRequest.proposedFamily,
+            proposedBaseRom: changeRequest.proposedBaseRom,
             reviewNote,
             appliedToAllVersions: (hasSharedChanges || hasTagChanges) && !!changeRequest.submission.hackFamilyId && changeRequest.applyToAllVersions,
           },
@@ -220,6 +241,9 @@ export async function POST(
     }, { timeout: 15000 });
   } catch (err: any) {
     if (err instanceof FamilyReassignError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    if (err instanceof BaseRomAssignError) {
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
     if (err?.code === 'P2002') {

@@ -9,6 +9,7 @@ import { stripMappingValues } from '@/lib/mappingFields';
 import { ensureTagsExist } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 import { resolveOrCreateFamily, propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
+import { checkSubmissionsRateLimit, rateLimitedResponse } from '@/lib/rateLimit';
 
 const createSubmissionSchema = z.object({
   hackName: z.string().min(1).max(200),
@@ -151,6 +152,14 @@ export async function POST(req: NextRequest) {
 
   if (session.user.trustScore < -50) {
     return NextResponse.json({ error: 'Account suspended due to low trust score' }, { status: 403 });
+  }
+
+  // Keyed by user id, not IP — see src/lib/rateLimit.ts for why. Checked
+  // here (after the cheap session/ban/trust checks, before body parsing and
+  // any DB write) so a rate-limited request never reaches the actual work.
+  const submissionsLimit = await checkSubmissionsRateLimit(session.user.id);
+  if (!submissionsLimit.success) {
+    return rateLimitedResponse(submissionsLimit);
   }
 
   let body: unknown;

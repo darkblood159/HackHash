@@ -37,3 +37,4 @@ next-env.d.ts
 /prisma/migrations/dev
 
 PRE_RELEASE_CHECKLIST.md
+CLAUDE_HANDOFF.txt

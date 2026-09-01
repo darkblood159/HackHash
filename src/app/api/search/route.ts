@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { relevanceScore, toISODateOnly } from '@/lib/hackFamily';
+import { checkSearchRateLimit, rateLimitedResponse, getClientIp } from '@/lib/rateLimit';
 
 // ─── Query normalization ───────────────────────────────────────────────────────
 //
@@ -128,6 +129,14 @@ function groupEntriesByFamily(entries: any[]): any[] {
 }
 
 export async function GET(req: NextRequest) {
+  // No auth on this route — IP is the only identifier available. Checked
+  // before anything else, including the empty-query short-circuit below,
+  // since even that is a full request/response round trip.
+  const searchLimit = await checkSearchRateLimit(getClientIp(req));
+  if (!searchLimit.success) {
+    return rateLimitedResponse(searchLimit);
+  }
+
   const { searchParams } = new URL(req.url);
   const q = searchParams.get('q')?.trim();
   const type = searchParams.get('type') ?? 'all';

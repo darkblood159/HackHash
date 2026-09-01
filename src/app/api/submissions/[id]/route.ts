@@ -9,6 +9,7 @@ import { MAPPING_FIELD_KEYS, stripMappingValues } from '@/lib/mappingFields';
 import { ALL_TAG_SLUGS, ensureTagsExist } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 import { propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
+import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
 import { resolveMachineName, triggerHasheousPushForSubmission } from '@/lib/approval';
 
 // ─── GET /api/submissions/:id ─────────────────────────────────────────────────
@@ -229,15 +230,24 @@ export async function PATCH(
   // exported DAT, which is the whole point of renaming an approved entry.
   const renameFieldsChanged = ['hackName', 'version', 'platform'].some((f) => f in updateData);
 
-  // If baseRomId is being changed, verify the target actually exists before
-  // hitting the transaction — same reasoning as POST /api/submissions'
-  // matching check: a raw FK violation is a confusing 500, this is a clean
-  // 400. Doesn't otherwise touch updateData.baseRomId — a real existing id
-  // just passes straight through unchanged.
+  // If baseRomId is being changed, validate the target before hitting the
+  // transaction — same reasoning as the existence-only version of this
+  // check used to have (a raw FK violation is a confusing 500, this is a
+  // clean 4xx), now extended to also catch a platform mismatch and a
+  // REJECTED target, the same two things reassignSubmissionFamily already
+  // enforces for hackFamilyId — baseRomId never had either check before
+  // this. Captures the target's name for a richer audit-log entry below,
+  // since this lookup already has it in hand.
+  let baseRomChangeDetail: { from: string | null; to: string; toName: string } | null = null;
   if ('baseRomId' in updateData && updateData.baseRomId) {
-    const baseRomExists = await prisma.baseRom.findUnique({ where: { id: updateData.baseRomId as string }, select: { id: true } });
-    if (!baseRomExists) {
-      return NextResponse.json({ error: 'That base ROM no longer exists — please pick a different one.' }, { status: 400 });
+    try {
+      const target = await validateBaseRomAssignment(prisma, updateData.baseRomId as string, (updateData.platform as string | undefined) ?? submission.platform);
+      baseRomChangeDetail = { from: submission.baseRomId, to: updateData.baseRomId as string, toName: target.name };
+    } catch (err) {
+      if (err instanceof BaseRomAssignError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
     }
   }
 
@@ -331,6 +341,7 @@ export async function PATCH(
         fields: [...Object.keys(updateData), ...Object.keys(mappingChanges), ...(hasTagChanges ? ['tags'] : [])],
         by: session.user.id,
         appliedToAllVersions: !!submission.hackFamilyId && applyToAllVersions && (hasSharedChanges || hasTagChanges),
+        ...(baseRomChangeDetail ? { baseRomChange: baseRomChangeDetail } : {}),
       },
       userId: session.user.id,
       submissionId: params.id,

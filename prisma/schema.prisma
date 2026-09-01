@@ -632,6 +632,15 @@ model ChangeRequest {
   // snapshot for anything but display. See reassignSubmissionFamily() in
   // src/lib/hackFamily.ts.
   proposedFamily Json?
+  // Proposed base-rom reassignment. Unlike proposedFamily above, this has
+  // no null-id/"detach" case — a submission's baseRomId is required at the
+  // application level (see the schema comment on Submission.baseRomId) and
+  // this feature only ever proposes SWITCHING to a different one, never
+  // clearing it. Shape when present: { id: string, name: string } — same
+  // display-only-snapshot-then-revalidate-by-id idea as proposedFamily,
+  // via validateBaseRomAssignment() in src/lib/baseRom.ts. null/absent =
+  // no base-rom change proposed.
+  proposedBaseRom Json?
   reason        String?             @db.Text
   status        ChangeRequestStatus @default(PENDING)
   reviewedById  String?

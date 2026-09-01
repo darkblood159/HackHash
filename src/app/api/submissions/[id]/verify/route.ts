@@ -5,6 +5,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { recalculateVerificationScore, updateSubmissionStatus, getUserWeight } from '@/lib/trust';
 import { performApprovalInTx, checkAutoApproval, canCastManualVote, VETERAN_THRESHOLD, triggerHasheousPushForSubmission, triggerHasheousPullForSubmission } from '@/lib/approval';
+import { checkVerifyRateLimit, rateLimitedResponse } from '@/lib/rateLimit';
 import { z } from 'zod';
 
 const verifySchema = z.object({
@@ -27,6 +28,16 @@ export async function POST(
 
   if (session.user.isBanned) {
     return NextResponse.json({ error: 'Your account has been banned' }, { status: 403 });
+  }
+
+  // Keyed by user id, shared with DELETE below (same counter — both are
+  // "this user changing verification state"). The existing submissionId_
+  // userId uniqueness check further down already stops a repeat vote on
+  // the SAME submission; this guards against rapid votes across many
+  // DIFFERENT submissions instead (e.g. a script cycling through ids).
+  const verifyLimit = await checkVerifyRateLimit(session.user.id);
+  if (!verifyLimit.success) {
+    return rateLimitedResponse(verifyLimit);
   }
 
   const submission = await prisma.submission.findUnique({
@@ -158,6 +169,12 @@ export async function DELETE(
   const session = await getServerSession(authOptions);
   if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  // Same shared counter as POST above.
+  const verifyLimit = await checkVerifyRateLimit(session.user.id);
+  if (!verifyLimit.success) {
+    return rateLimitedResponse(verifyLimit);
   }
 
   const verification = await prisma.verification.findUnique({
