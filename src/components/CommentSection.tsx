@@ -7,6 +7,7 @@ import { Avatar } from './ui/Avatar';
 import { Button } from './ui/Button';
 import { formatDistanceToNow } from 'date-fns';
 import Link from 'next/link';
+import { Trash2 } from 'lucide-react';
 
 interface Comment {
   id: string;
@@ -19,14 +20,24 @@ export function CommentSection({
   submissionId,
   comments,
   canComment,
+  isAdmin = false,
 }: {
   submissionId: string;
   comments: Comment[];
   canComment: boolean;
+  isAdmin?: boolean;
 }) {
   const router = useRouter();
   const [content, setContent] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  // Which single comment currently has its "Delete this comment?" confirm
+  // showing, and which one (if any) has a delete request actually in
+  // flight. Kept separate, and both scoped to one comment id at a time —
+  // opening a confirm on a different comment implicitly closes any other,
+  // matching the mutually-exclusive inline-confirm pattern already used on
+  // /admin/base-roms (Edit/Reject/Remove on the same row).
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const submit = async () => {
     if (!content.trim()) return;
@@ -43,6 +54,19 @@ export function CommentSection({
       }
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const deleteComment = async (commentId: string) => {
+    setDeletingId(commentId);
+    try {
+      const res = await fetch(`/api/admin/comments/${commentId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setConfirmingId(null);
+        router.refresh();
+      }
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -69,6 +93,34 @@ export function CommentSection({
               </div>
               <p className="text-sm text-text-secondary mt-1 whitespace-pre-wrap">{c.content}</p>
             </div>
+            {isAdmin && (
+              confirmingId === c.id ? (
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    disabled={deletingId === c.id}
+                    onClick={() => deleteComment(c.id)}
+                    className="text-[11px] px-2 py-1 rounded border border-status-rejected/40 text-status-rejected hover:bg-status-rejected/10 disabled:opacity-50"
+                  >
+                    {deletingId === c.id ? 'Deleting…' : 'Confirm'}
+                  </button>
+                  <button
+                    disabled={deletingId === c.id}
+                    onClick={() => setConfirmingId(null)}
+                    className="text-[11px] px-2 py-1 rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConfirmingId(c.id)}
+                  title="Delete comment"
+                  className="shrink-0 p-1 rounded-md text-text-muted hover:text-status-rejected hover:bg-status-rejected/10 transition-colors"
+                >
+                  <Trash2 size={13} />
+                </button>
+              )
+            )}
           </div>
         ))}
       </div>

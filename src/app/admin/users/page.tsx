@@ -9,15 +9,31 @@ import { UserActionMenu } from '@/components/UserActionMenu';
 export const dynamic = 'force-dynamic';
 
 export default async function AdminUsersPage() {
-  const users = await prisma.user.findMany({
-    select: {
-      id: true, name: true, email: true, image: true, role: true,
-      trustScore: true, isBanned: true, createdAt: true,
-      _count: { select: { submissions: true, verifications: true } },
-    },
-    orderBy: { trustScore: 'desc' },
-    take: 50,
-  });
+  // Comment counts are fetched separately, filtered to isDeleted: false, and
+  // merged in by userId — rather than an unfiltered _count on the relation
+  // (like submissions/verifications below still use). Those two can't
+  // currently go stale since nothing removes a submission/verification row
+  // outright, but comments can now be individually or mass-deleted, and the
+  // "Delete all comments (N)" action in UserActionMenu needs N to actually
+  // drop once that happens — an unfiltered count would keep showing the
+  // original number forever, looking like the action silently did nothing.
+  const [users, commentCounts] = await Promise.all([
+    prisma.user.findMany({
+      select: {
+        id: true, name: true, email: true, image: true, role: true,
+        trustScore: true, isBanned: true, createdAt: true,
+        _count: { select: { submissions: true, verifications: true } },
+      },
+      orderBy: { trustScore: 'desc' },
+      take: 50,
+    }),
+    prisma.comment.groupBy({
+      by: ['userId'],
+      where: { isDeleted: false },
+      _count: { _all: true },
+    }),
+  ]);
+  const commentCountByUser = new Map(commentCounts.map((c) => [c.userId, c._count._all]));
 
   return (
     <div>
@@ -52,7 +68,7 @@ export default async function AdminUsersPage() {
                 <td className="px-4 py-3 text-text-muted hidden sm:table-cell">{u._count.submissions}</td>
                 <td className="px-4 py-3 text-text-muted hidden md:table-cell">{format(new Date(u.createdAt), 'MMM yyyy')}</td>
                 <td className="px-4 py-3 text-right">
-                  <UserActionMenu userId={u.id} currentRole={u.role} trustScore={u.trustScore} isBanned={u.isBanned} />
+                  <UserActionMenu userId={u.id} currentRole={u.role} trustScore={u.trustScore} isBanned={u.isBanned} commentCount={commentCountByUser.get(u.id) ?? 0} />
                 </td>
               </tr>
             ))}

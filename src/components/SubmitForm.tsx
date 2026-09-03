@@ -525,7 +525,12 @@ export function SubmitForm() {
           {/* Confirmed hash summary */}
           <div className="p-4 rounded-lg bg-bg-surface border border-border">
             <div className="flex items-center justify-between mb-3">
-              <span className="text-sm font-medium text-text-primary">{romInfo.filename}</span>
+              <div>
+                <span className="text-sm font-medium text-text-primary">{romInfo.filename}</span>
+                {romInfo.sourceArchiveName && (
+                  <p className="text-[11px] text-text-muted mt-0.5">extracted from {romInfo.sourceArchiveName}</p>
+                )}
+              </div>
               <button type="button" onClick={() => { setStep(1); setEarlyDuplicate(null); }} className="text-xs text-text-muted hover:text-phosphor flex items-center gap-1">
                 <ChevronLeft size={12} /> Re-hash
               </button>

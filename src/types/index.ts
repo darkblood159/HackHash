@@ -130,8 +130,16 @@ export interface ROMFileInfo {
   md5: string;
   sha1: string;
   processing: boolean;
-  progress: number;
+  progress: number | null; // null = in progress, no known percent (7z/RAR extraction has no percent-complete callback at all — see src/lib/archiveExtract.ts). Never null once processing is false.
   error?: string;
+  // Both new, optional, additive — set when this file came from inside an
+  // archive (src/lib/archiveExtract.ts) rather than being hashed directly.
+  // `filename`/`fileSize` above already describe the extracted ROM itself
+  // (never the archive), so every existing consumer works unchanged;
+  // these two only drive purely-cosmetic "extracted from" UI and the
+  // in-progress phase label in ROMProcessor.tsx.
+  sourceArchiveName?: string;
+  phase?: 'loading' | 'extracting' | 'hashing'; // 'loading' = fetching/starting the archive reader itself (currently only 7z/RAR — jszip and gzip's DecompressionStream are both already-bundled, so there's nothing to separately "load" for those)
 }
 
 // ─── Submission ───────────────────────────────────────────────────────────────

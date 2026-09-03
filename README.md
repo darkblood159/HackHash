@@ -1,4 +1,4 @@
-# HackHash
+# ROMHack DAT
 
 A community-driven DAT database for ROM hacks, fan translations, homebrew, and preservation
 projects — built like a cross between No-Intro, Redump, and Wikipedia moderation.

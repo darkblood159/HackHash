@@ -361,7 +361,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
           )}
 
           {/* Comments */}
-          <CommentSection submissionId={submission.id} comments={submission.comments as any} canComment={!!session?.user} />
+          <CommentSection submissionId={submission.id} comments={submission.comments as any} canComment={!!session?.user} isAdmin={isAdmin} />
 
           <ChangeRequestSection
             submissionId={submission.id}

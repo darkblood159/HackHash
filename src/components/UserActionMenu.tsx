@@ -15,16 +15,19 @@ export function UserActionMenu({
   currentRole,
   trustScore,
   isBanned,
+  commentCount = 0,
 }: {
   userId: string;
   currentRole: string;
   trustScore: number;
   isBanned: boolean;
+  commentCount?: number;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [customAmount, setCustomAmount] = useState('');
+  const [confirmingDeleteComments, setConfirmingDeleteComments] = useState(false);
 
   const act = async (body: Record<string, unknown>) => {
     setLoading(true);
@@ -37,6 +40,7 @@ export function UserActionMenu({
       router.refresh();
       setOpen(false);
       setCustomAmount('');
+      setConfirmingDeleteComments(false);
     } finally {
       setLoading(false);
     }
@@ -136,6 +140,58 @@ export function UserActionMenu({
             >
               {isBanned ? 'Unban user' : 'Ban user'}
             </button>
+
+            {/* Bulk comment removal — deliberately only offered once an
+                account is actually banned (not just any user), matching
+                what was asked for: a way to clear out a bad account's whole
+                comment history at once, rather than a general-purpose bulk
+                tool. Hidden entirely rather than shown-disabled when there's
+                nothing to delete, since a 0-comment user has nothing useful
+                to say about that state. commentCount comes from the same
+                unfiltered _count this menu already trusts for submissions/
+                verifications above — if some of this user's comments were
+                already removed individually, this label can overcount
+                (still includes those rows), but that only affects the
+                number shown here, never what the server actually deletes
+                (always exactly the still-live ones, re-checked fresh
+                server-side — the success message after confirming will
+                show the real number). */}
+            {isBanned && commentCount > 0 && (
+              <>
+                <div className="border-t border-border-subtle my-1" />
+                {!confirmingDeleteComments ? (
+                  <button
+                    disabled={loading}
+                    onClick={() => setConfirmingDeleteComments(true)}
+                    className="w-full text-left px-3 py-1.5 text-sm text-status-rejected hover:bg-bg-hover disabled:opacity-40"
+                  >
+                    Delete all comments ({commentCount})
+                  </button>
+                ) : (
+                  <div className="px-3 py-1.5 space-y-1.5">
+                    <p className="text-xs text-text-muted">
+                      Delete every comment from this user, everywhere on the site? This can&apos;t be undone from here.
+                    </p>
+                    <div className="flex gap-1.5">
+                      <button
+                        disabled={loading}
+                        onClick={() => act({ action: 'DELETE_COMMENTS' })}
+                        className="flex-1 text-xs px-2 py-1 rounded border border-status-rejected/40 text-status-rejected hover:bg-status-rejected/10 disabled:opacity-40"
+                      >
+                        Confirm delete
+                      </button>
+                      <button
+                        disabled={loading}
+                        onClick={() => setConfirmingDeleteComments(false)}
+                        className="flex-1 text-xs px-2 py-1 rounded border border-border text-text-primary hover:bg-bg-hover disabled:opacity-40"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </>
       )}
