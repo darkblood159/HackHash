@@ -374,6 +374,13 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               releaseDate: toISODateOnly(submission.releaseDate),
               platform: submission.platform,
               sourceUrl: submission.sourceUrl,
+              description: submission.description,
+              notes: submission.notes,
+              releasePageUrl: submission.releasePageUrl,
+              githubUrl: submission.githubUrl,
+              patchType: submission.patchType,
+              patchFilename: submission.patchFilename,
+              patchSha1: submission.patchSha1,
             }}
             currentMapping={submission.gameMapping as any}
             currentFamily={submission.hackFamily}

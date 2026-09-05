@@ -68,63 +68,130 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
 
   const update = (field: keyof typeof form, value: string) => setForm((f) => ({ ...f, [field]: value }));
 
+  // Order-insensitive — same helper ChangeRequestSection.tsx already has
+  // for the identical tags/translationLanguages comparison below.
+  const sameSet = (a: string[], b: string[]) => a.length === b.length && a.every((x) => b.includes(x));
+
+  // FIX (September 4 2026): this used to send the ENTIRE form on every
+  // save, unconditionally — every field's current value, whether or not it
+  // was actually touched. That's what produced "Version changelog:
+  // Expected string, received null" the moment an admin edited ANY field
+  // on a submission whose versionChangelog (or description/author/
+  // sourceUrl) happened to already be null: the untouched, still-null field
+  // got resent as literal `null` every time and tripped patchFieldLimits'
+  // then-non-nullable check (now fixed on that end too — see the FIX note
+  // on patchFieldLimits itself). Rebuilt to diff against `initial`/`tags`/
+  // `currentBaseRom` and only send what actually changed, mirroring the
+  // diffing ChangeRequestSection.tsx's submitRequest() already does for the
+  // exact same fields — this is the direct fix for "edit a specific entry
+  // without worrying about the others."
+  //
+  // Diffing here also closes two real, connected gaps found while fixing
+  // this, not separately reported before now: (1) hasTagChanges/
+  // hasMappingChanges on the PATCH route were EFFECTIVELY always true
+  // for every save through this panel, since tags/every mapping key were
+  // always present in the body regardless of whether they were touched —
+  // meaning ANY edit (even just fixing a typo in the hack name) also
+  // force-resynced this submission's tags onto every sibling version
+  // (propagateTags does a blind full-replace, no change-detection of its
+  // own), silently overwriting a sibling's legitimately-different tags —
+  // exactly the kind of per-version difference the granular tag system was
+  // built to support. (2) The same always-present pattern meant
+  // hasMappingChanges was also always true, so every edit of an APPROVED
+  // submission fired an immediate Hasheous push (see the trigger at the
+  // bottom of the PATCH route) regardless of whether the Mappings section
+  // was touched at all. Diffing makes both of these fire only when the
+  // relevant thing genuinely changed, same as the audit log's own "fields"
+  // list now accurately reflecting what was actually edited instead of
+  // listing every field every time.
   const save = async () => {
     setSaving(true);
     setError(null);
     try {
-      const mappingPayload: Record<string, string | null> = {};
-      for (const key of MAPPING_FIELD_KEYS) {
-        mappingPayload[key] = mappingForm[key] || null;
+      const changes: Record<string, unknown> = {};
+      if (form.hackName !== initial.hackName) changes.hackName = form.hackName;
+      if (form.version !== initial.version) changes.version = form.version;
+      if (form.platform !== initial.platform) changes.platform = form.platform;
+      if (form.author !== (initial.author ?? '')) changes.author = form.author || null;
+      if (form.description !== (initial.description ?? '')) changes.description = form.description || null;
+      if (form.versionChangelog !== (initial.versionChangelog ?? '')) changes.versionChangelog = form.versionChangelog || null;
+      if (form.sourceUrl !== (initial.sourceUrl ?? '')) changes.sourceUrl = form.sourceUrl || null;
+
+      // Paired, same reasoning as ChangeRequestSection's identical check —
+      // if either half differs from what's on record, send both together
+      // so saving correctly clears whichever one is being switched away
+      // from (see resolveReleaseFields() in src/lib/hackFamily.ts).
+      const newYear = form.releaseYear ? parseInt(form.releaseYear, 10) : null;
+      const newDate = form.releaseDate || null;
+      if (newYear !== initial.releaseYear || newDate !== (initial.releaseDate ?? null)) {
+        changes.releaseYear = newYear;
+        changes.releaseDate = newDate;
       }
 
-      const res = await fetch(`/api/submissions/${submissionId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          hackName: form.hackName,
-          version: form.version,
-          platform: form.platform,
-          author: form.author || null,
-          releaseYear: form.releaseYear ? parseInt(form.releaseYear, 10) : null,
-          releaseDate: form.releaseDate || null,
-          description: form.description || null,
-          versionChangelog: form.versionChangelog || null,
-          sourceUrl: form.sourceUrl || null,
-          tags: tagsForm,
-          translationLanguages: translationLanguagesForm,
-          applyToAllVersions,
-          // Only sent when there's a real, completed new pick that differs
-          // from what was there — never clears it. BaseRomPicker's own
-          // "Change" button resets its value to null mid-pick without an
-          // explicit "remove entirely" affordance the way FamilyPicker's
-          // "Remove from family" is, and this app treats a base rom as
-          // required at the application level — so silently sending a
-          // null here (e.g. because the admin clicked Change and then
-          // navigated away without finishing) would be an accidental,
-          // hard-to-notice unlink. Assigning one for the first time to a
-          // pre-existing submission that predates the requirement works
-          // the same way this check already handles it: currentBaseRom is
-          // null, any real pick differs from that, so it's sent.
-          ...(selectedBaseRom && selectedBaseRom.id !== (currentBaseRom?.id ?? null)
-            ? { baseRomId: selectedBaseRom.id }
-            : {}),
-          ...mappingPayload,
-        }),
-      });
+      const mappingPayload: Record<string, string | null> = {};
+      for (const key of MAPPING_FIELD_KEYS) {
+        const newVal = mappingForm[key] || null;
+        const oldVal = mapping?.[key] || null;
+        if (newVal !== oldVal) mappingPayload[key] = newVal;
+      }
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(describeValidationError(data.details) ?? data.error ?? 'Save failed');
+      const tagsChanged = !sameSet(tagsForm, tags ?? []);
+      const translationLanguagesChanged = !sameSet(translationLanguagesForm, initial.translationLanguages ?? []);
+      // Only sent when there's a real, completed new pick that differs
+      // from what was there — never clears it. BaseRomPicker's own
+      // "Change" button resets its value to null mid-pick without an
+      // explicit "remove entirely" affordance the way FamilyPicker's
+      // "Remove from family" is, and this app treats a base rom as
+      // required at the application level — so silently sending a
+      // null here (e.g. because the admin clicked Change and then
+      // navigated away without finishing) would be an accidental,
+      // hard-to-notice unlink. Assigning one for the first time to a
+      // pre-existing submission that predates the requirement works
+      // the same way this check already handles it: currentBaseRom is
+      // null, any real pick differs from that, so it's sent.
+      const baseRomChanged = !!selectedBaseRom && selectedBaseRom.id !== (currentBaseRom?.id ?? null);
+      const familyChanged = (selectedFamily?.id ?? null) !== (currentFamily?.id ?? null);
+
+      const hasMainPayload =
+        Object.keys(changes).length > 0 || Object.keys(mappingPayload).length > 0 ||
+        tagsChanged || translationLanguagesChanged || baseRomChanged;
+
+      if (!hasMainPayload && !familyChanged) {
+        // Nothing actually changed — closing the panel without a wasted
+        // round trip (and a misleading, empty-fields audit log entry) is
+        // the honest behavior here, same as Cancel.
+        setOpen(false);
         return;
+      }
+
+      if (hasMainPayload) {
+        const res = await fetch(`/api/submissions/${submissionId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...changes,
+            ...(tagsChanged ? { tags: tagsForm } : {}),
+            ...(translationLanguagesChanged ? { translationLanguages: translationLanguagesForm } : {}),
+            applyToAllVersions,
+            ...(baseRomChanged ? { baseRomId: selectedBaseRom!.id } : {}),
+            ...mappingPayload,
+          }),
+        });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setError(describeValidationError(data.details) ?? data.error ?? 'Save failed');
+          return;
+        }
       }
 
       // Family reassignment is a separate endpoint (membership, not a
       // field-sync change — see reassignSubmissionFamily in
       // src/lib/hackFamily.ts), fired only if it actually changed, after
-      // the main save succeeds. A failure here doesn't roll back the main
+      // the main save succeeds (or is skipped entirely, if this save is
+      // ONLY a family change). A failure here doesn't roll back the main
       // save above — that already committed successfully and there's no
       // reason to lose it over an unrelated follow-up call.
-      const familyChanged = (selectedFamily?.id ?? null) !== (currentFamily?.id ?? null);
       if (familyChanged) {
         const familyRes = await fetch(`/api/admin/submissions/${submissionId}/family`, {
           method: 'POST',
@@ -133,7 +200,9 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
         });
         if (!familyRes.ok) {
           const data = await familyRes.json().catch(() => ({}));
-          setError(`Saved the other changes, but the family change failed: ${data.error ?? 'please try again'}`);
+          setError(hasMainPayload
+            ? `Saved the other changes, but the family change failed: ${data.error ?? 'please try again'}`
+            : `Family change failed: ${data.error ?? 'please try again'}`);
           return;
         }
       }

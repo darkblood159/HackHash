@@ -45,6 +45,13 @@ interface ChangeRequestSectionProps {
     releaseDate: string | null; // 'YYYY-MM-DD'
     platform: string;
     sourceUrl: string | null;
+    description: string | null;
+    notes: string | null;
+    releasePageUrl: string | null;
+    githubUrl: string | null;
+    patchType: string | null;
+    patchFilename: string | null;
+    patchSha1: string | null;
   };
   currentMapping?: MappingValues | null;
   currentFamily?: SelectedFamily | null;
@@ -58,6 +65,7 @@ interface ChangeRequestSectionProps {
 }
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
+const PATCH_TYPES = ['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS'] as const;
 
 export function ChangeRequestSection({ submissionId, current, currentMapping, currentFamily = null, currentBaseRom = null, currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions }: ChangeRequestSectionProps) {
   const router = useRouter();
@@ -72,6 +80,13 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
     releaseDate: current.releaseDate ?? '',
     platform: current.platform,
     sourceUrl: current.sourceUrl ?? '',
+    description: current.description ?? '',
+    notes: current.notes ?? '',
+    releasePageUrl: current.releasePageUrl ?? '',
+    githubUrl: current.githubUrl ?? '',
+    patchType: current.patchType ?? '',
+    patchFilename: current.patchFilename ?? '',
+    patchSha1: current.patchSha1 ?? '',
   });
   // Starts in whichever mode matches the submission's current data — see
   // the identical reasoning in AdminEditPanel.tsx.
@@ -114,6 +129,13 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
     }
     if (form.platform !== current.platform) changes.platform = form.platform;
     if (form.sourceUrl !== (current.sourceUrl ?? '')) changes.sourceUrl = form.sourceUrl || null;
+    if (form.description !== (current.description ?? '')) changes.description = form.description || null;
+    if (form.notes !== (current.notes ?? '')) changes.notes = form.notes || null;
+    if (form.releasePageUrl !== (current.releasePageUrl ?? '')) changes.releasePageUrl = form.releasePageUrl || null;
+    if (form.githubUrl !== (current.githubUrl ?? '')) changes.githubUrl = form.githubUrl || null;
+    if (form.patchType !== (current.patchType ?? '')) changes.patchType = form.patchType || null;
+    if (form.patchFilename !== (current.patchFilename ?? '')) changes.patchFilename = form.patchFilename || null;
+    if (form.patchSha1 !== (current.patchSha1 ?? '')) changes.patchSha1 = form.patchSha1 || null;
 
     for (const key of MAPPING_FIELD_KEYS) {
       const newVal = mappingForm[key] || null;
@@ -259,6 +281,10 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
             </div>
           </div>
           <div>
+            <label className="block text-xs text-text-muted mb-1">Description</label>
+            <textarea rows={3} className={inputClass} value={form.description} onChange={(e) => update('description', e.target.value)} />
+          </div>
+          <div>
             <label className="block text-xs text-text-muted mb-1">Version changelog</label>
             <textarea rows={2} className={inputClass} placeholder="What's different in this specific version" value={form.versionChangelog} onChange={(e) => update('versionChangelog', e.target.value)} />
           </div>
@@ -266,6 +292,56 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
             <label className="block text-xs text-text-muted mb-1">Why? (helps the admin reviewing this)</label>
             <textarea rows={2} className={inputClass} value={reason} onChange={(e) => setReason(e.target.value)} />
           </div>
+
+          {/* Patch details + additional links & notes — same collapsible
+              pattern as SubmitForm.tsx's identical sections, tucked away by
+              default since most proposals won't touch them. */}
+          <details className="group border border-border rounded-lg" open={!!(current.patchType || current.patchFilename || current.patchSha1)}>
+            <summary className="px-4 py-3 cursor-pointer text-sm font-medium text-text-primary list-none flex items-center justify-between">
+              Patch details
+              <span className="text-text-muted text-xs group-open:rotate-180 transition-transform">▾</span>
+            </summary>
+            <div className="px-4 pb-4 grid sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Patch type</label>
+                <select className={inputClass} value={form.patchType} onChange={(e) => update('patchType', e.target.value)}>
+                  <option value="">None</option>
+                  {PATCH_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Patch filename</label>
+                <input className={inputClass} value={form.patchFilename} onChange={(e) => update('patchFilename', e.target.value)} placeholder="hack.bps" />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs text-text-muted mb-1">Patch SHA-1</label>
+                <input className={`${inputClass} font-mono`} value={form.patchSha1} onChange={(e) => update('patchSha1', e.target.value)} placeholder="40-character hex" />
+              </div>
+            </div>
+          </details>
+
+          <details className="group border border-border rounded-lg" open={!!(current.notes || current.releasePageUrl || current.githubUrl)}>
+            <summary className="px-4 py-3 cursor-pointer text-sm font-medium text-text-primary list-none flex items-center justify-between">
+              Additional links &amp; notes
+              <span className="text-text-muted text-xs group-open:rotate-180 transition-transform">▾</span>
+            </summary>
+            <div className="px-4 pb-4 space-y-3">
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-text-muted mb-1">Release page URL</label>
+                  <input type="url" className={inputClass} value={form.releasePageUrl} onChange={(e) => update('releasePageUrl', e.target.value)} placeholder="https://..." />
+                </div>
+                <div>
+                  <label className="block text-xs text-text-muted mb-1">GitHub URL</label>
+                  <input type="url" className={inputClass} value={form.githubUrl} onChange={(e) => update('githubUrl', e.target.value)} placeholder="https://github.com/..." />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted mb-1">Notes</label>
+                <textarea rows={2} className={inputClass} value={form.notes} onChange={(e) => update('notes', e.target.value)} placeholder="Anything verifiers should know" />
+              </div>
+            </div>
+          </details>
 
           <MappingsSection values={mappingForm} onChange={setMappingForm} />
 

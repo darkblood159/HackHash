@@ -4,6 +4,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
+import { PLATFORMS } from '@/types';
+import { NULLABLE_FIELD_LIMITS, isNullableLimitField } from '@/lib/fieldLimits';
 import { MAPPING_FIELD_KEYS, stripMappingValues, isMappingFieldKey } from '@/lib/mappingFields';
 import { SHARED_FIELD_KEYS } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
@@ -85,6 +87,47 @@ const changeRequestSchema = z.object({
   { message: 'Propose at least one change — a field edit, a tag change, a family change, or a base ROM change' }
 );
 
+// FLAGGED-BUT-DEFERRED GAP, NOW CLOSED (see CLAUDE_HANDOFF.txt section 2w):
+// `changes` above only ever checked that each key was a real editable field
+// and that each value was the right JS *type* (string/number/null) — never
+// length or format, unlike PATCH /api/submissions/[id]'s patchFieldLimits,
+// which has covered this for direct edits since August. That asymmetry was
+// a small exposure while only a few of EDITABLE_FIELDS had a matching input
+// anywhere in ChangeRequestSection.tsx; now that the propose form covers
+// most of them, an unvalidated free-text bag is worth actually closing
+// rather than carrying forward again. hackName/version/platform get their
+// own small non-nullable check here (mirroring patchFieldLimits' identical
+// three) since Submission.hackName/version/platform aren't nullable at the
+// Prisma level; everything else nullable shares NULLABLE_FIELD_LIMITS
+// (src/lib/fieldLimits.ts) — the SAME limits patchFieldLimits now uses, so
+// a value that would be rejected by a direct admin edit is rejected here
+// too, instead of only failing later, more confusingly, at approval time.
+// releaseYear/releaseDate are deliberately still unchecked here, matching
+// patchFieldLimits' own existing (pre-dating this change) choice to leave
+// those two to resolveReleaseFields() rather than a format check — not
+// something this pass changes. Mapping-field IDs, tags, family, and base
+// ROM are all validated separately already (their own schema fields above,
+// or ensureTagsExist()/validateBaseRomAssignment() downstream) — nothing
+// here duplicates those.
+const REQUIRED_STRING_LIMITS: Record<string, z.ZodTypeAny> = {
+  hackName: z.string().min(1).max(200),
+  version: z.string().min(1).max(50),
+  platform: z.enum(PLATFORMS),
+};
+
+function validateChangeValues(changes: Record<string, string | number | null>): Record<string, string[]> | null {
+  const fieldErrors: Record<string, string[]> = {};
+  for (const [key, value] of Object.entries(changes)) {
+    const validator = REQUIRED_STRING_LIMITS[key] ?? (isNullableLimitField(key) ? NULLABLE_FIELD_LIMITS[key] : null);
+    if (!validator) continue; // no per-field rule to enforce for this key (see comment above)
+    const result = validator.safeParse(value);
+    if (!result.success) {
+      fieldErrors[key] = result.error.issues.map((issue) => issue.message);
+    }
+  }
+  return Object.keys(fieldErrors).length > 0 ? fieldErrors : null;
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } }
@@ -106,6 +149,12 @@ export async function POST(
   const parsed = changeRequestSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ error: 'Validation failed', details: parsed.error.flatten() }, { status: 422 });
+  }
+
+  const valueErrors = validateChangeValues(parsed.data.changes);
+  if (valueErrors) {
+    console.error('POST /api/submissions/[id]/change-request validation failed:', JSON.stringify(valueErrors));
+    return NextResponse.json({ error: 'Validation failed', details: { fieldErrors: valueErrors } }, { status: 422 });
   }
 
   // Validate a proposed family reassignment eagerly, against whichever

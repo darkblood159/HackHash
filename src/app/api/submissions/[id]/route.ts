@@ -6,6 +6,7 @@ import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
 import { PLATFORMS } from '@/types';
 import { MAPPING_FIELD_KEYS, stripMappingValues } from '@/lib/mappingFields';
+import { NULLABLE_FIELD_LIMITS } from '@/lib/fieldLimits';
 import { ALL_TAG_SLUGS, ensureTagsExist } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 import { propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
@@ -95,27 +96,41 @@ export async function GET(
 // their own separate checks elsewhere in this file), so this only ever
 // validates the fields it's actually meant to cover.
 //
+// FIX (found live, September 4 2026 — "Version changelog: Expected string,
+// received null" whenever an admin edited a submission that had no
+// versionChangelog set): every one of the ten fields below is genuinely
+// nullable at the Prisma level (Submission.description/versionChangelog/
+// author/sourceUrl/notes/releasePageUrl/githubUrl/patchType/patchFilename/
+// patchSha1 are all `?` columns), but none of their validators accepted
+// `null` — only a real string (or absence, via .partial()). AdminEditPanel
+// sends its ENTIRE form on every save, not a diff (see that component's own
+// fix note), which meant an untouched nullable field that happened to
+// already be null got resent as literal `null` and hit this exact gap.
+// .nullable() below (sourced from the shared NULLABLE_FIELD_LIMITS —
+// src/lib/fieldLimits.ts, also used by the change-request propose route
+// now) fixes the crash regardless of caller; AdminEditPanel's own fix means
+// it should rarely even resend an untouched null field going forward, but
+// this route has to be correct on its own regardless of who's calling it —
+// a null IS a legitimate value for all ten of these columns (it's how an
+// admin clears one that had something in it), so the validator needs to
+// accept it on its own merits, not just because a well-behaved caller
+// happens not to send it unnecessarily.
+//
 // Deliberately relaxed from create's own rules in one way: author has no
 // .min(1) here even though create requires a non-empty value when the field
 // is present at all. Create never needs to represent "clear this field" (a
 // fresh submission has nothing to clear FROM); an edit does — an admin
 // removing a wrongly-attributed author needs to be able to save an empty
-// string. hackName/version keep create's .min(1) unchanged since those are
-// never meant to be clearable to empty on a submission that already exists.
+// string (or, now, null — see the FIX note above). hackName/version keep
+// create's .min(1) unchanged since those are never meant to be clearable to
+// empty on a submission that already exists, and platform can't be cleared
+// at all (not nullable at the Prisma level) — all three are correspondingly
+// absent from NULLABLE_FIELD_LIMITS itself, not just left non-nullable here.
 const patchFieldLimits = z.object({
   hackName: z.string().min(1).max(200),
   version: z.string().min(1).max(50),
-  description: z.string().max(5000),
-  versionChangelog: z.string().max(3000),
-  author: z.string().max(200),
   platform: z.enum(PLATFORMS),
-  sourceUrl: z.string().url(),
-  notes: z.string().max(5000),
-  releasePageUrl: z.string().url().or(z.literal('')),
-  githubUrl: z.string().url().or(z.literal('')),
-  patchType: z.enum(['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS']),
-  patchFilename: z.string().max(500),
-  patchSha1: z.string().regex(/^[0-9a-f]{40}$/i),
+  ...NULLABLE_FIELD_LIMITS,
 }).partial();
 
 export async function PATCH(
