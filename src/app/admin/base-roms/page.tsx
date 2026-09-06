@@ -2,6 +2,7 @@
 
 // src/app/admin/base-roms/page.tsx
 import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { Disc3, CheckCircle2, XCircle, Pencil, Trash2 } from 'lucide-react';
 import { PLATFORMS, PLATFORM_LABELS } from '@/types';
 
@@ -175,7 +176,14 @@ export default function AdminBaseRomsPage() {
                   <p className="text-xs text-text-muted mt-0.5">
                     {r.platform} · submitted by {r.submittedBy?.name ?? 'unknown'} ·{' '}
                     {new Date(r.createdAt).toLocaleDateString()}
-                    {r._count.submissions > 0 && <> · used by {r._count.submissions} submission{r._count.submissions === 1 ? '' : 's'}</>}
+                    {r._count.submissions > 0 && (
+                      <>
+                        {' · '}
+                        <Link href={`/submissions?baseRomId=${r.id}`} className="underline hover:text-phosphor">
+                          used by {r._count.submissions} submission{r._count.submissions === 1 ? '' : 's'}
+                        </Link>
+                      </>
+                    )}
                   </p>
                   <p className="text-xs font-mono text-text-muted mt-1">
                     CRC32 {r.crc32} · MD5 {r.md5}

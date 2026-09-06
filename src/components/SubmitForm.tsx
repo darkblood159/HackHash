@@ -18,8 +18,8 @@ import { TagsEditor } from './TagsEditor';
 import { LanguagePicker } from './LanguagePicker';
 import { parseRomFilename } from '@/lib/filenameParser';
 import { MAPPING_FIELD_KEYS } from '@/lib/mappingFields';
-
-const PATCH_TYPES = ['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS'] as const;
+import { PATCH_TYPES } from '@/lib/patchTypes';
+import { PatchDropzone, type ParsedPatch } from './PatchDropzone';
 
 interface FormState {
   hackName: string;
@@ -179,6 +179,34 @@ export function SubmitForm() {
     } catch {
       // Non-fatal — same convenience-not-gate philosophy as the rest of this.
     }
+  };
+
+  // From PatchDropzone below. Sets values directly via setForm rather than
+  // the per-field update() helper above (which would immediately clear
+  // autoFilledFields for a field touched in the same call), then marks all
+  // three auto-filled together in one follow-up call — same two-step shape
+  // as applyFamilyPrefill just above. UNLIKE that prefill, this always
+  // overwrites patchFilename/patchSha1 even if something was already
+  // there: dropping a file is a specific, deliberate "use this file's
+  // info" action, not a passive background suggestion, so replacing a
+  // stale or placeholder value already sitting there is the expected
+  // result, not something to guard against. patchType is the one
+  // exception — left alone when the extension isn't recognized, so this
+  // never silently overwrites a correct manual pick with nothing.
+  const applyPatchParse = ({ patchType, patchFilename, patchSha1 }: ParsedPatch) => {
+    setForm((f) => ({
+      ...f,
+      patchFilename,
+      patchSha1,
+      patchType: patchType ?? f.patchType,
+    }));
+    setAutoFilledFields((prev) => {
+      const next = new Set(prev);
+      next.add('patchFilename');
+      next.add('patchSha1');
+      if (patchType) next.add('patchType');
+      return next;
+    });
   };
 
   const checkSimilarName = async (name: string, platform: string) => {
@@ -818,19 +846,22 @@ export function SubmitForm() {
               Patch details (optional)
               <span className="text-text-muted text-xs group-open:rotate-180 transition-transform">▾</span>
             </summary>
-            <div className="px-4 pb-4 grid sm:grid-cols-2 gap-5">
-              <Field label="Patch type">
-                <select className={inputClass} value={form.patchType} onChange={(e) => update('patchType', e.target.value)}>
-                  <option value="">None</option>
-                  {PATCH_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </Field>
-              <Field label="Patch filename">
-                <input className={inputClass} value={form.patchFilename} onChange={(e) => update('patchFilename', e.target.value)} placeholder="hack.bps" />
-              </Field>
-              <Field label="Patch SHA-1" hint="If you've hashed the patch file separately">
-                <input className={`${inputClass} font-mono`} value={form.patchSha1} onChange={(e) => update('patchSha1', e.target.value)} placeholder="40-character hex" />
-              </Field>
+            <div className="px-4 pb-4 space-y-4">
+              <PatchDropzone onParsed={applyPatchParse} />
+              <div className="grid sm:grid-cols-2 gap-5">
+                <Field label="Patch type" autoFilled={autoFilledFields.has('patchType')}>
+                  <select className={inputClass} value={form.patchType} onChange={(e) => update('patchType', e.target.value)}>
+                    <option value="">None</option>
+                    {PATCH_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </Field>
+                <Field label="Patch filename" autoFilled={autoFilledFields.has('patchFilename')}>
+                  <input className={inputClass} value={form.patchFilename} onChange={(e) => update('patchFilename', e.target.value)} placeholder="hack.bps" />
+                </Field>
+                <Field label="Patch SHA-1" hint="Drag the patch file in above, or hash it separately and paste the value here" autoFilled={autoFilledFields.has('patchSha1')}>
+                  <input className={`${inputClass} font-mono`} value={form.patchSha1} onChange={(e) => update('patchSha1', e.target.value)} placeholder="40-character hex" />
+                </Field>
+              </div>
             </div>
           </details>
 

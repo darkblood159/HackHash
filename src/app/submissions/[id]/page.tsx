@@ -11,7 +11,7 @@ import { ScoreGauge } from '@/components/ui/ScoreGauge';
 import { TrustBadge } from '@/components/ui/TrustBadge';
 import { Avatar } from '@/components/ui/Avatar';
 import { formatDistanceToNow, format } from 'date-fns';
-import { ExternalLink, Github, FileText, ChevronDown } from 'lucide-react';
+import { ExternalLink, Github, FileText, ChevronDown, Search } from 'lucide-react';
 import Link from 'next/link';
 import { VerifyPanel } from '@/components/VerifyPanel';
 import { AdminActions } from '@/components/AdminActions';
@@ -102,6 +102,17 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
         select: { id: true, version: true, status: true, createdAt: true },
       })
     : [];
+
+  // How many OTHER live submissions point at the same base rom, if any —
+  // powers the "find other hacks using this base ROM" link in the Base ROM
+  // card below. A plain count (Submission.baseRomId is already indexed)
+  // rather than fetching full rows, since this page only needs the number;
+  // the actual list is what /submissions?baseRomId=... is for.
+  const baseRomUsageCount = submission.baseRomId
+    ? await prisma.submission.count({
+        where: { baseRomId: submission.baseRomId, id: { not: submission.id }, deletedAt: null },
+      })
+    : 0;
 
   const userVerification = session?.user
     ? submission.verifications.find((v) => v.user.id === session.user.id)
@@ -282,6 +293,19 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
                 <HashRow label="MD5" value={submission.baseRom.md5} />
                 <HashRow label="SHA1" value={submission.baseRom.sha1} />
               </div>
+              {baseRomUsageCount > 0 ? (
+                <Link
+                  href={`/submissions?baseRomId=${submission.baseRom.id}`}
+                  className="mt-3 pt-3 border-t border-border-subtle flex items-center gap-1.5 text-xs text-phosphor hover:underline"
+                >
+                  <Search size={12} />
+                  Find {baseRomUsageCount} other hack{baseRomUsageCount === 1 ? '' : 's'} using this base ROM
+                </Link>
+              ) : (
+                <p className="mt-3 pt-3 border-t border-border-subtle text-xs text-text-muted">
+                  No other submissions reference this base ROM yet.
+                </p>
+              )}
             </div>
           )}
 

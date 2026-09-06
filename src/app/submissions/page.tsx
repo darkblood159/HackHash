@@ -20,7 +20,7 @@ const STATUSES = ['PENDING', 'COMMUNITY_VERIFIED', 'RECOMMENDED', 'APPROVED', 'R
 export default async function SubmissionsPage({
   searchParams,
 }: {
-  searchParams: { status?: string; platform?: string; tag?: string };
+  searchParams: { status?: string; platform?: string; tag?: string; baseRomId?: string };
 }) {
   const status = searchParams.status && STATUSES.includes(searchParams.status) ? searchParams.status : undefined;
   const platform = searchParams.platform && (PLATFORMS as readonly string[]).includes(searchParams.platform)
@@ -28,12 +28,26 @@ export default async function SubmissionsPage({
     : undefined;
   const tag = searchParams.tag;
 
+  // Resolved (not just trusted-as-is) the same way status/platform above
+  // are checked against a known-valid set before use — a stale/mistyped id
+  // falls back to "no filter" rather than silently sending a where clause
+  // that would just return zero rows with no explanation. Needs its own
+  // lookup (not just a raw id passthrough) regardless, since the banner
+  // below has to show a human-readable name, not the id itself.
+  const baseRomFilter = searchParams.baseRomId
+    ? await prisma.baseRom.findUnique({
+        where: { id: searchParams.baseRomId },
+        select: { id: true, name: true, platform: true },
+      })
+    : null;
+
   const submissions = await prisma.submission.findMany({
     where: {
       deletedAt: null,
       ...(status ? { status: status as any } : {}),
       ...(platform ? { platform: platform as any } : {}),
       ...(tag ? { tags: { some: { tag: { slug: tag } } } } : {}),
+      ...(baseRomFilter ? { baseRomId: baseRomFilter.id } : {}),
     },
     include: {
       submittedBy: { select: { id: true, name: true, image: true, username: true } },
@@ -43,6 +57,15 @@ export default async function SubmissionsPage({
     orderBy: [{ verificationScore: 'desc' }, { createdAt: 'desc' }],
     take: 50,
   });
+
+  // Manually rebuilt (rather than reading useSearchParams, which needs a
+  // client component) the same way entries/page.tsx's buildPageLink already
+  // does — preserves every OTHER active filter, drops only baseRomId.
+  const clearBaseRomParams = new URLSearchParams();
+  if (status) clearBaseRomParams.set('status', status);
+  if (platform) clearBaseRomParams.set('platform', platform);
+  if (tag) clearBaseRomParams.set('tag', tag);
+  const clearBaseRomHref = `/submissions${clearBaseRomParams.toString() ? `?${clearBaseRomParams.toString()}` : ''}`;
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-12">
@@ -56,6 +79,17 @@ export default async function SubmissionsPage({
         </div>
         <PlatformFilters current={platform} />
         <TagFilters current={tag} />
+        {baseRomFilter && (
+          <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-phosphor/30 bg-phosphor/5 text-xs">
+            <span className="text-text-secondary">
+              Showing hacks that use <span className="text-phosphor font-medium">{baseRomFilter.name}</span> as their base ROM
+            </span>
+            <PlatformBadge platform={baseRomFilter.platform} size="sm" />
+            <Link href={clearBaseRomHref} className="ml-auto text-text-muted hover:text-phosphor underline shrink-0">
+              Clear
+            </Link>
+          </div>
+        )}
       </div>
 
       {submissions.length === 0 && (

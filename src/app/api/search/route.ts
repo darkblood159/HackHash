@@ -128,6 +128,126 @@ function groupEntriesByFamily(entries: any[]): any[] {
   });
 }
 
+// Same two-strategy shape as buildSubmissionTextFilters/buildEntryTextFilters
+// above, just pointed at BaseRom.name instead — a base rom only has the one
+// name field to match against, so this is the simpler of the three.
+function buildBaseRomNameFilters(q: string, words: string[], normalized: string) {
+  const allWordsFilter =
+    words.length >= 2
+      ? {
+          AND: words.map((word) => ({
+            OR: wordVariants(word).map((v) => ({ name: { contains: v, mode: 'insensitive' as const } })),
+          })),
+        }
+      : null;
+
+  const fullStringFilter = {
+    OR: [
+      { name: { contains: normalized, mode: 'insensitive' as const } },
+      { name: { contains: q, mode: 'insensitive' as const } },
+    ],
+  };
+
+  return allWordsFilter ? [allWordsFilter, fullStringFilter] : [fullStringFilter];
+}
+
+// "Search by base rom" mode: the query is matched against a BaseRom's OWN
+// name/hash — never a hack's — and what comes back is still the familiar
+// submissions/entries shape (whichever hacks reference whatever base rom(s)
+// matched), so SearchInterface.tsx needed no new result rendering, only a
+// mode toggle plus (optionally) the matched base rom's name shown per
+// result. Kept as its own function rather than threaded through the
+// existing hash/text branches below: those are well-exercised as-is, and
+// this keeps them completely untouched. Dedup only needs to happen at the
+// "which base roms matched" step (mirrors the outer function's own
+// strategy-A/strategy-B merge) — once that's resolved to a plain id list,
+// the submissions/entries queries below are each a single `in:` lookup, no
+// second merge needed.
+// Matches exactly what GET's own hashCondition ternary below actually
+// produces (no explicit annotation there either) — spelled out here only
+// because a function parameter needs some declared type, unlike a local
+// const TypeScript can infer on its own.
+type HashCondition = { sha1: string } | { md5: string } | { crc32: string };
+
+async function searchByBaseRom(
+  q: string,
+  normalized: string,
+  words: string[],
+  hashCondition: HashCondition | null,
+  type: string,
+  platform: string | undefined
+) {
+  const isHashQuery = !!hashCondition;
+
+  let resolvedIds: string[];
+  if (isHashQuery) {
+    resolvedIds = (await prisma.baseRom.findMany({ where: hashCondition!, select: { id: true } })).map((b) => b.id);
+  } else {
+    const filters = buildBaseRomNameFilters(q, words, normalized);
+    const lists = await Promise.all(filters.map((where) => prisma.baseRom.findMany({ where, select: { id: true }, take: 50 })));
+    const seen = new Set<string>();
+    resolvedIds = lists.flat().map((r) => r.id).filter((id) => (seen.has(id) ? false : (seen.add(id), true)));
+  }
+
+  if (resolvedIds.length === 0) {
+    return NextResponse.json({ submissions: [], entries: [], query: q, mode: isHashQuery ? 'hash' : 'text', by: 'baserom' });
+  }
+
+  const platformFilter: Record<string, unknown> = platform ? { platform: platform as any } : {};
+
+  const [submissions, entries] = await Promise.all([
+    type !== 'entries'
+      ? prisma.submission.findMany({
+          where: { baseRomId: { in: resolvedIds }, deletedAt: null, status: { not: 'APPROVED' }, ...platformFilter },
+          select: {
+            id: true, hackName: true, version: true, author: true, platform: true,
+            status: true, verificationScore: true, sha1: true, crc32: true,
+            baseRom: { select: { id: true, name: true } },
+            tags: { select: { tag: { select: { id: true, name: true, slug: true, description: true } } } },
+          },
+          orderBy: { verificationScore: 'desc' },
+          take: 50,
+        })
+      : [],
+    type !== 'submissions'
+      ? prisma.approvedEntry.findMany({
+          where: { submission: { baseRomId: { in: resolvedIds }, deletedAt: null }, ...platformFilter },
+          select: {
+            id: true, submissionId: true, machineName: true, crc32: true, sha1: true, platform: true,
+            submission: {
+              select: {
+                hackName: true, author: true, releaseYear: true, releaseDate: true, hackFamilyId: true,
+                hackFamily: { select: { name: true } }, baseRom: { select: { id: true, name: true } },
+              },
+            },
+          },
+          take: 50,
+        })
+      : [],
+  ]);
+
+  // Exact hash match needs no relevance ranking — there's nothing fuzzy
+  // about it. Text mode ranks by how well the QUERY matches the MATCHED
+  // base rom's name (not the hack's own name — a hack called "Zelda Redux"
+  // built on a base rom literally named "zelda" should still rank by how
+  // well "zelda" matches that base rom name, same relevanceScore already
+  // used everywhere else in this file, just pointed at a different field).
+  if (!isHashQuery) {
+    submissions.sort((a, b) => relevanceScore(b.baseRom?.name ?? '', normalized) - relevanceScore(a.baseRom?.name ?? '', normalized));
+    (entries as any[]).sort(
+      (a, b) => relevanceScore(b.submission?.baseRom?.name ?? '', normalized) - relevanceScore(a.submission?.baseRom?.name ?? '', normalized)
+    );
+  }
+
+  return NextResponse.json({
+    submissions,
+    entries: groupEntriesByFamily(entries as any[]),
+    query: q,
+    mode: isHashQuery ? 'hash' : 'text',
+    by: 'baserom',
+  });
+}
+
 export async function GET(req: NextRequest) {
   // No auth on this route — IP is the only identifier available. Checked
   // before anything else, including the empty-query short-circuit below,
@@ -141,6 +261,7 @@ export async function GET(req: NextRequest) {
   const q = searchParams.get('q')?.trim();
   const type = searchParams.get('type') ?? 'all';
   const platform = searchParams.get('platform') ?? undefined;
+  const by = searchParams.get('by') === 'baserom' ? 'baserom' : 'hack';
 
   if (!q || q.length < 2) {
     return NextResponse.json({ submissions: [], entries: [], users: [] });
@@ -156,6 +277,10 @@ export async function GET(req: NextRequest) {
     : isHash32 ? { md5: q.toLowerCase() }
     : isHash8  ? { crc32: q.toLowerCase() }
     : null;
+
+  if (by === 'baserom') {
+    return searchByBaseRom(q, normalized, words, hashCondition, type, platform);
+  }
 
   if (hashCondition) {
     // Exact hash lookup — no fuzzy needed
