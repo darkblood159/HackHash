@@ -3,7 +3,7 @@
 // src/components/SubmitForm.tsx
 import React, { useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { useSession, signIn } from 'next-auth/react';
+import { useSession } from 'next-auth/react';
 import { ROMProcessor } from './ROMProcessor';
 import { MappingsSection, type MappingValues } from './MappingsSection';
 import { HackNameAutocomplete, type HackFamilySuggestion } from './HackNameAutocomplete';
@@ -468,7 +468,18 @@ export function SubmitForm() {
     return (
       <div className="text-center py-16 border border-dashed border-border rounded-xl">
         <p className="text-text-secondary mb-4">Sign in to submit a ROM hack for review.</p>
-        <Button onClick={() => signIn('github')}>Sign in with GitHub</Button>
+        {/* SEPT-6 FIX: this used to call signIn('github') directly, hardcoding
+            GitHub as the only option regardless of whether Discord was also
+            configured — the exact same bug already found and fixed on the
+            navbar's own sign-in button (Aug 26) and on /auth/signin itself,
+            just missed here. Routes to the canonical /auth/signin page
+            instead, same as the navbar does, so there's exactly one place
+            in the app that decides which providers to show (via
+            getProviders()) rather than a second hardcoded copy that can
+            drift out of sync with it again. callbackUrl brings the user
+            back here — SubmitForm only ever renders on /submit, so this
+            doesn't need usePathname() the way the navbar's version does. */}
+        <Button onClick={() => router.push(`/auth/signin?callbackUrl=${encodeURIComponent('/submit')}`)}>Sign in</Button>
       </div>
     );
   }
