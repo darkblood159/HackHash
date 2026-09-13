@@ -62,6 +62,19 @@ const entrySchema = z.object({
     sha1: z.string().regex(/^[0-9a-f]{40}$/i),
     status: z.enum(['PENDING', 'APPROVED', 'REJECTED']).optional(),
   }).optional(),
+  // Other compressed/container copies of this exact file, present only for
+  // a detailed-export re-import — see the matching comment on
+  // dat-generator.ts's DetailedEntry.details.alternateFormats for why
+  // there's no status field here (every entry in this array is APPROVED
+  // by construction on export).
+  alternateFormats: z.array(z.object({
+    format: z.string().min(1).max(50),
+    filename: z.string().min(1).max(500),
+    fileSize: z.string().regex(/^\d+$/),
+    crc32: z.string().regex(/^[0-9a-f]{8}$/i),
+    md5: z.string().regex(/^[0-9a-f]{32}$/i),
+    sha1: z.string().regex(/^[0-9a-f]{40}$/i),
+  })).max(20).optional(),
   sourceUrl: z.string().url().max(1000).optional(),
   releasePageUrl: z.string().url().max(1000).optional(),
   githubUrl: z.string().url().max(1000).optional(),
@@ -326,6 +339,38 @@ export async function POST(req: NextRequest) {
                 true // tx here is an open prisma.$transaction — see resolveOrCreateBaseRom's inTransaction param
               );
               await tx.submission.update({ where: { id: submission.id }, data: { baseRomId } });
+            }
+
+            // Alternate formats — only present for a detailed-export
+            // re-import, same as baseRom just above. Always created as
+            // APPROVED directly, crediting the importing admin as both
+            // submitter and reviewer (mirrors baseRom's own submittedById
+            // treatment above, for the same "bulk import, not a live user
+            // action" reason) — see the long comment on dat-generator.ts's
+            // DetailedEntry.details.alternateFormats for why there's no
+            // status to round-trip: the export only ever includes entries
+            // already confirmed in the source database. createMany with
+            // skipDuplicates guards against a hand-edited/malformed upload
+            // listing the same hash twice for one entry, which the live
+            // app's own (submissionId, sha1) uniqueness constraint would
+            // never produce on export in the first place.
+            if (entry.alternateFormats?.length) {
+              await tx.alternateFormat.createMany({
+                data: entry.alternateFormats.map((af) => ({
+                  submissionId: submission.id,
+                  format: af.format,
+                  filename: af.filename,
+                  fileSize: BigInt(af.fileSize),
+                  crc32: af.crc32,
+                  md5: af.md5,
+                  sha1: af.sha1,
+                  status: 'APPROVED' as const,
+                  addedById: session.user.id,
+                  reviewedById: session.user.id,
+                  reviewedAt: new Date(),
+                })),
+                skipDuplicates: true,
+              });
             }
 
             // Tags — same self-healing resolution as everywhere else tags

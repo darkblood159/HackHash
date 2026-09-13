@@ -109,6 +109,25 @@ interface DetailedEntry {
       status: string;
     } | null;
 
+    // Other compressed/container copies of this exact file that a trusted
+    // reviewer has confirmed (see the AlternateFormat model's own comment
+    // in prisma/schema.prisma). Deliberately APPROVED-only here — this
+    // export is meant to be authoritative/re-importable, and an unreviewed
+    // community claim shouldn't get treated as settled fact just by
+    // appearing in it. `status` isn't part of this shape for that same
+    // reason: every entry present here is APPROVED by construction (see
+    // the `where` in getDetailedApprovedEntries below), so re-import
+    // creates each one with status APPROVED directly rather than needing
+    // to round-trip a field that could only ever hold one value here.
+    alternateFormats: {
+      format: string;
+      filename: string;
+      fileSize: string;
+      crc32: string;
+      md5: string;
+      sha1: string;
+    }[];
+
     sourceUrl: string | null;
     releasePageUrl: string | null;
     githubUrl: string | null;
@@ -145,7 +164,7 @@ export async function getApprovedEntries(platform?: string): Promise<DATMachine[
     orderBy: { machineName: 'asc' },
   });
 
-  return entries.map((e) => ({
+  const primary: DATMachine[] = entries.map((e) => ({
     machineName: e.machineName,
     description: e.description,
     romName: e.romName,
@@ -154,6 +173,64 @@ export async function getApprovedEntries(platform?: string): Promise<DATMachine[
     md5: e.md5.toLowerCase(),
     sha1: e.sha1.toLowerCase(),
   }));
+
+  // Approved alternate formats (RVZ/CHD/etc — see the AlternateFormat model's
+  // own comment in prisma/schema.prisma) become their OWN additional entries
+  // here, not just a note on a submission's own page — this is specifically
+  // what makes a registered-and-verified alternate format actually USABLE by
+  // a real ROM-management tool doing hash matching, which is the whole point
+  // of registering one in the first place. Deliberately scoped to the plain
+  // DAT/JSON/CSV export only (not the detailed export, where these already
+  // appear correctly NESTED under their true parent's `details.alternateFormats`
+  // — surfacing them AGAIN here as independent top-level entries would double
+  // them up in that richer format and confuse its own reimport). A flat DAT
+  // has no concept of "these two entries are actually the same underlying
+  // game" beyond sharing a `description` — same "same game, different hash"
+  // idiom already used for regional variants in real-world DATs, not a new
+  // convention invented for this.
+  //
+  // `machineName` (the internal, unique-per-entry identifier — never what's
+  // actually displayed; see resolveMachineName's own comment in approval.ts)
+  // gets the format appended in brackets. Collisions are only theoretically
+  // possible (two different APPROVED alternate formats on one submission
+  // happening to share the exact same format label) and are handled the
+  // same reactive, only-when-actually-needed way resolveMachineName already
+  // handles the primary case — checked in-memory against everything already
+  // built in this same export, not a database constraint, since these are
+  // computed records, not real ApprovedEntry rows.
+  const altFormats = await prisma.alternateFormat.findMany({
+    where: {
+      status: 'APPROVED',
+      submission: {
+        deletedAt: null,
+        ...(platform ? { platform: platform as any } : {}),
+      },
+    },
+    include: { submission: { include: { approvedEntry: true } } },
+  });
+
+  const usedNames = new Set(primary.map((p) => p.machineName));
+  const altEntries: DATMachine[] = [];
+  for (const af of altFormats) {
+    const parent = af.submission.approvedEntry;
+    if (!parent) continue; // shouldn't happen (alt formats only attach to already-APPROVED submissions) but never worth a crash over
+    let name = `${parent.machineName} [${af.format}]`;
+    if (usedNames.has(name)) {
+      name = `${parent.machineName} [${af.format} ${af.sha1.slice(0, 7)}]`;
+    }
+    usedNames.add(name);
+    altEntries.push({
+      machineName: name,
+      description: parent.description,
+      romName: af.filename,
+      fileSize: af.fileSize.toString(),
+      crc32: af.crc32.toLowerCase(),
+      md5: af.md5.toLowerCase(),
+      sha1: af.sha1.toLowerCase(),
+    });
+  }
+
+  return [...primary, ...altEntries].sort((a, b) => a.machineName.localeCompare(b.machineName));
 }
 
 export async function getDetailedApprovedEntries(platform?: string): Promise<DetailedEntry[]> {
@@ -172,6 +249,7 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
           tags: { include: { tag: true } },
           hackFamily: true,
           baseRom: true,
+          alternateFormats: { where: { status: 'APPROVED' }, orderBy: { createdAt: 'asc' } },
         },
       },
     },
@@ -237,6 +315,15 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
               status: sub.baseRom.status,
             }
           : null,
+
+        alternateFormats: sub?.alternateFormats.map((af) => ({
+          format: af.format,
+          filename: af.filename,
+          fileSize: af.fileSize.toString(),
+          crc32: af.crc32,
+          md5: af.md5,
+          sha1: af.sha1,
+        })) ?? [],
 
         sourceUrl: sub?.sourceUrl ?? null,
         releasePageUrl: sub?.releasePageUrl ?? null,

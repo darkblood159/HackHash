@@ -45,6 +45,21 @@ export interface ParsedDatEntry {
     sha1: string;
     status?: string;
   };
+  // Other compressed/container copies of this exact file (see the
+  // AlternateFormat model's own comment in prisma/schema.prisma) —
+  // present only for a "detailed" export re-import, and only ever
+  // APPROVED entries to begin with (see dat-generator.ts). No `status`
+  // field here for that same reason — every entry re-created from this
+  // is created as APPROVED directly (see POST /api/admin/import), there's
+  // nothing to round-trip a status value for.
+  alternateFormats?: {
+    format: string;
+    filename: string;
+    fileSize: string;
+    crc32: string;
+    md5: string;
+    sha1: string;
+  }[];
   sourceUrl?: string;
   releasePageUrl?: string;
   githubUrl?: string;
@@ -224,6 +239,30 @@ export function parseDatJson(jsonText: string): ParsedDatEntry[] {
                 sha1: String(d.baseRom.sha1).trim().toLowerCase(),
                 ...(d.baseRom.status ? { status: String(d.baseRom.status).trim() } : {}),
               },
+            }
+          : {}),
+        ...(Array.isArray(d?.alternateFormats) && d.alternateFormats.length
+          ? {
+              // Same defensive shape as baseRom above: a malformed individual
+              // entry (missing a hash, etc.) is dropped rather than failing
+              // the whole import — one bad alternate-format claim shouldn't
+              // block the entry it's attached to from importing at all.
+              alternateFormats: d.alternateFormats
+                .filter((af: unknown): af is Record<string, unknown> =>
+                  !!af && typeof af === 'object'
+                  && !!(af as Record<string, unknown>).format
+                  && !!(af as Record<string, unknown>).filename
+                  && !!(af as Record<string, unknown>).crc32
+                  && !!(af as Record<string, unknown>).md5
+                  && !!(af as Record<string, unknown>).sha1)
+                .map((af: Record<string, unknown>) => ({
+                  format: String(af.format).trim(),
+                  filename: String(af.filename).trim(),
+                  fileSize: String(af.fileSize ?? '0'),
+                  crc32: String(af.crc32).trim().toLowerCase(),
+                  md5: String(af.md5).trim().toLowerCase(),
+                  sha1: String(af.sha1).trim().toLowerCase(),
+                })),
             }
           : {}),
         ...(d?.sourceUrl ? { sourceUrl: String(d.sourceUrl).trim() } : {}),

@@ -18,12 +18,16 @@ import { AdminActions } from '@/components/AdminActions';
 import { AdminEditPanel } from '@/components/AdminEditPanel';
 import { CommentSection } from '@/components/CommentSection';
 import { ChangeRequestSection } from '@/components/ChangeRequestSection';
+import { PatchFileUpload } from '@/components/PatchFileUpload';
+import { PatchApplyButton } from '@/components/PatchApplyButton';
+import { canManagePatchFile } from '@/lib/patchPermissions';
 import { MappingsDisplay } from '@/components/MappingsDisplay';
 import { languageName } from '@/lib/languages';
 import { ForceRepullButton } from '@/components/ForceRepullButton';
 import { HasheousSyncBadge } from '@/components/HasheousSyncBadge';
 import { DuplicateReportButton } from '@/components/DuplicateReportButton';
 import { RestoreSubmissionButton } from '@/components/RestoreSubmissionButton';
+import { AlternateFormats } from '@/components/AlternateFormats';
 import ReleaseDate from '@/components/ReleaseDate';
 import { toISODateOnly } from '@/lib/hackFamily';
 
@@ -75,6 +79,13 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
       gameMapping: true,
       baseRom: true,
       hackFamily: { select: { id: true, name: true } },
+      alternateFormats: {
+        orderBy: { createdAt: 'asc' },
+        include: {
+          addedBy: { select: { id: true, name: true, username: true } },
+          reviewedBy: { select: { id: true, name: true, username: true } },
+        },
+      },
       changeRequests: {
         include: {
           requestedBy: { select: { id: true, name: true, image: true } },
@@ -121,6 +132,29 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
   const isOwner = session?.user?.id === submission.submittedBy.id;
   const isAdmin = session?.user?.role === 'ADMINISTRATOR';
   const canVerify = session?.user && !isOwner && !userVerification && !['APPROVED', 'REJECTED'].includes(submission.status);
+  const canManagePatch = canManagePatchFile({
+    viewerId: session?.user?.id,
+    viewerRole: session?.user?.role,
+    submittedById: submission.submittedBy.id,
+    status: submission.status,
+    patchUploadedAt: submission.patchUploadedAt,
+  });
+  // Mirrors GET /api/submissions/[id]/patch's own gate exactly — shown
+  // here only when it would actually succeed, rather than letting someone
+  // go through the whole "drop your ROM" flow just to hit a 403 at the
+  // very last step.
+  const canDownloadPatch =
+    submission.status === 'APPROVED' || isOwner || isAdmin || session?.user?.role === 'VERIFIER';
+  // Single shared condition for "the in-browser patch flow actually
+  // applies here" — used both by the header CTA below and by the section
+  // itself further down, so the two can't drift out of sync with each
+  // other about when to show up.
+  const canPatchInBrowser = !!(
+    submission.patchUploadedAt &&
+    submission.patchType &&
+    submission.baseRom &&
+    canDownloadPatch
+  );
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-12">
@@ -174,6 +208,14 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
         <div className="flex flex-col items-end gap-2 shrink-0">
           <StatusBadge status={submission.status} />
           <ScoreGauge score={submission.verificationScore} />
+          {canPatchInBrowser && (
+            <PatchApplyButton
+              submissionId={submission.id}
+              patchType={submission.patchType!}
+              baseRom={{ sha1: submission.baseRom!.sha1, name: submission.baseRom!.name }}
+              expectedOutput={{ sha1: submission.sha1, filename: submission.filename }}
+            />
+          )}
         </div>
       </div>
 
@@ -265,11 +307,47 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               <HashRow label="CRC32" value={submission.crc32} />
               <HashRow label="MD5" value={submission.md5} />
               <HashRow label="SHA1" value={submission.sha1} />
-              {submission.patchType && <HashRow label="Patch type" value={submission.patchType} />}
-              {submission.patchFilename && <HashRow label="Patch filename" value={submission.patchFilename} />}
-              {submission.patchSha1 && <HashRow label="Patch SHA1" value={submission.patchSha1} />}
             </div>
           </div>
+
+          {/* Patch file */}
+          <div className="p-5 rounded-lg border border-border bg-bg-surface">
+            <h2 className="text-sm font-semibold text-text-primary mb-3">Patch file</h2>
+            {(submission.patchType || submission.patchFilename || submission.patchSha1) && (
+              <div className="space-y-0 mb-3">
+                {submission.patchType && <HashRow label="Type" value={submission.patchType} />}
+                {submission.patchFilename && <HashRow label="Filename" value={submission.patchFilename} />}
+                {submission.patchSha1 && <HashRow label="SHA1" value={submission.patchSha1} />}
+                {submission.patchFileSize != null && (
+                  <HashRow label="Size" value={formatBytes(Number(submission.patchFileSize))} />
+                )}
+                {submission.patchUploadedAt && (
+                  <HashRow label="Uploaded" value={format(new Date(submission.patchUploadedAt), 'MMM d, yyyy')} />
+                )}
+              </div>
+            )}
+            <PatchFileUpload
+              submissionId={submission.id}
+              canManage={canManagePatch}
+              hasFile={!!submission.patchUploadedAt}
+            />
+          </div>
+
+          {/* Alternate formats */}
+          {submission.status === 'APPROVED' && (
+            <AlternateFormats
+              submissionId={submission.id}
+              formats={submission.alternateFormats.map((f) => ({
+                ...f,
+                fileSize: f.fileSize.toString(),
+                createdAt: f.createdAt.toISOString(),
+              }))}
+              canAdd={!!session?.user && !session.user.isBanned}
+              viewerId={session?.user?.id ?? null}
+              viewerRole={session?.user?.role ?? 'GUEST'}
+              viewerTrustScore={session?.user?.trustScore ?? 0}
+            />
+          )}
 
           {/* Base ROM */}
           {submission.baseRom && (

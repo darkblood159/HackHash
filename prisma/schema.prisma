@@ -72,6 +72,9 @@ model User {
   changeRequestsReviewed ChangeRequest[] @relation("ChangeRequestReviewer")
   baseRomsSubmitted      BaseRom[]       @relation("BaseRomSubmittedBy")
   baseRomsApproved       BaseRom[]       @relation("BaseRomApprovedBy")
+  patchUploads           Submission[]    @relation("SubmissionPatchUploadedBy")
+  alternateFormatsAdded    AlternateFormat[] @relation("AlternateFormatAddedBy")
+  alternateFormatsReviewed AlternateFormat[] @relation("AlternateFormatReviewedBy")
 }
 
 enum UserRole {
@@ -132,6 +135,30 @@ model Submission {
   patchType         PatchType?
   patchFilename     String?
   patchSha1         String?
+  // Whether the patch FILE ITSELF (not just the type/filename/hash trio
+  // above) has actually been uploaded and stored — see POST
+  // /api/submissions/[id]/patch and src/lib/patchStorage.ts. This trio is
+  // ADDITIONAL to patchType/patchFilename/patchSha1, not a replacement:
+  // those three stay meaningful on their own for a submission that only
+  // links out to an externally-hosted patch (PatchDropzone's hash-only
+  // mode). patchUploadedAt is the real "is a file attached" flag — check
+  // that, not patchSha1, since patchSha1 can be filled in with no file
+  // ever having been uploaded.
+  patchFileSize     Int?
+  patchUploadedAt   DateTime?
+  patchUploadedById String?
+  patchUploadedBy   User?            @relation("SubmissionPatchUploadedBy", fields: [patchUploadedById], references: [id])
+  // The exact human-readable slug (from hackName + version, sanitized —
+  // see buildPatchDisplaySlug in src/lib/patchStorage.ts) baked into the
+  // stored file's actual filename on disk, alongside patchSha1: files are
+  // named {patchSha1}__{patchStoredSlug}.{ext}, not bare hashes, so a
+  // patch-storage folder means something when browsed directly (see
+  // CLAUDE_HANDOFF.txt section 2au). Persisted rather than recomputed on
+  // every read specifically so a LATER edit to hackName/version can never
+  // make an already-uploaded file unfindable — the slug is only ever
+  // regenerated at upload/re-upload time, same lifecycle as
+  // patchUploadedAt above.
+  patchStoredSlug   String?
   // Reference to the UNPATCHED source ROM this hack's patch expects to be
   // applied against — different from crc32/md5/sha1 above, which hash the
   // finished/patched ROM this submission is actually about. Helps people
@@ -185,6 +212,7 @@ model Submission {
   approvedEntry    ApprovedEntry?
   tags             SubmissionTag[]
   changeRequests   ChangeRequest[]
+  alternateFormats AlternateFormat[]
 
   @@index([sha1])
   @@index([md5])
@@ -375,6 +403,98 @@ model BaseRom {
   submissions     Submission[]
 
   @@index([platform])
+  @@index([status])
+}
+
+// ─── Alternate Formats ─────────────────────────────────────────────────────────
+// A registry of OTHER compressed/container formats the same already-approved
+// hack is known to exist in — e.g. the patch produces an .iso, and someone
+// separately compresses that exact .iso to .rvz (Dolphin) or .chd
+// (chdman/MAME) for their own storage/distribution. Submission's own
+// crc32/md5/sha1/filename fields (above) are left completely untouched by
+// this feature and remain "the original format" / the default — this model
+// only ever holds the EXTRAS, exactly mirroring how BaseRom sits alongside
+// Submission rather than replacing anything on it.
+//
+// WHY THIS ISN'T "JUST ANOTHER ARCHIVE" LIKE ZIP/7Z/RAR (see
+// src/lib/archiveExtract.ts): those formats are lossless WRAPPERS — once
+// extracted, you get back the exact original bytes, so the existing
+// pipeline just unwraps and hashes the same underlying ROM. RVZ and CHD are
+// not wrappers; they're re-encoded disc-image formats with their own
+// internal structure, and decoding either one back to raw bytes in the
+// browser is a genuinely separate, much larger engineering effort (RVZ
+// especially — see CLAUDE_HANDOFF.txt for what that would actually take).
+// So `crc32`/`md5`/`sha1` below hash the alternate-format FILE ITSELF as a
+// whole, exactly the way any direct (non-archive) file already gets hashed
+// by ROMProcessor.tsx — this proves two copies of that exact compressed
+// file are byte-identical to each other, not (on its own) that the
+// compressed file decodes to the same content as the canonical submission.
+// That's why `status` exists: a trusted reviewer (see canCastManualVote in
+// src/lib/approval.ts — the same Verifier/Administrator/Veteran-tier gate
+// already used for the main submission's own "manual vote" path) is
+// expected to separately decode the file with their own external tool
+// (chdman, DolphinTool, etc.) and confirm it actually matches before
+// flipping this to APPROVED — the same "I vouch for this based on review,
+// not an automated proof" shape manual votes already use, applied to a
+// smaller, submission-scoped claim instead of the whole hack. Reusing the
+// full weighted-vote/auto-approval machinery from approval.ts would be
+// disproportionate for what's meant to be a light, secondary feature; a
+// single trusted reviewer flipping status (mirroring BaseRom's own
+// admin-approve shape) is the deliberately simpler choice here.
+//
+// `format` is free text, NOT an enum — the space of ROM/disc compression
+// formats (RVZ, CHD, CSO, WBFS, NKIT, GCZ, ...) is far larger and faster-
+// moving than something like PatchType's fixed six values, and a Prisma
+// enum would need a migration for every new one that shows up. A small
+// curated suggestion list lives in src/lib/alternateFormats.ts for the UI
+// only — same "additive, not meant to be exhaustive" spirit as
+// src/lib/romExtensions.ts / src/lib/languages.ts / src/lib/tags.ts.
+//
+// Uniqueness is scoped to the submission (`@@unique([submissionId, sha1])`),
+// NOT global the way BaseRom.sha1 is — an alternate format is inherently a
+// property of one specific submission's file, not a shared entity reused
+// across many submissions the way a base rom genuinely is.
+enum AlternateFormatStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model AlternateFormat {
+  id              String                @id @default(cuid())
+  submissionId    String
+  submission      Submission            @relation(fields: [submissionId], references: [id])
+  format          String
+  filename        String
+  fileSize        BigInt
+  crc32           String
+  md5             String
+  sha1            String
+  status          AlternateFormatStatus @default(PENDING)
+  addedById       String?
+  addedBy         User?                 @relation("AlternateFormatAddedBy", fields: [addedById], references: [id])
+  reviewedById    String?
+  reviewedBy      User?                 @relation("AlternateFormatReviewedBy", fields: [reviewedById], references: [id])
+  reviewedAt      DateTime?
+  rejectionReason String?
+  // True when this was approved because a qualified reviewer (same
+  // canCastManualVote bar as a manual review — Verifier/Administrator/
+  // Veteran trust tier) dropped a file that hashed to an EXACT match,
+  // verified server-side against the stored crc32/md5/sha1 — see POST
+  // .../formats/[formatId]/review's `verifiedHash` handling. Mirrors
+  // src/lib/approval.ts's checkAutoApproval `hasVeteranMatch` rule for the
+  // PRIMARY submission (a single Veteran-tier-or-above hash match is
+  // already enough to auto-approve there, no separate vote needed) — same
+  // trust bar, same "a real match from someone qualified is sufficient on
+  // its own" principle, applied to this smaller, submission-scoped claim.
+  // False (the default) for anything approved the older way — a reviewer
+  // manually clicking Confirm without ever dropping a matching file, or an
+  // entry approved before this existed. Always false for PENDING/REJECTED.
+  verifiedByHash  Boolean               @default(false)
+  createdAt       DateTime              @default(now())
+
+  @@unique([submissionId, sha1])
+  @@index([submissionId])
   @@index([status])
 }
 

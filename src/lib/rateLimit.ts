@@ -1,7 +1,8 @@
 // src/lib/rateLimit.ts
 //
 // Rate limiting for POST /api/submissions, POST+DELETE
-// /api/submissions/[id]/verify, and GET /api/search — Upstash Redis (REST,
+// /api/submissions/[id]/verify, POST /api/submissions/[id]/patch, and GET
+// /api/search — Upstash Redis (REST,
 // not a TCP connection — works fine from behind Nginx Proxy Manager +
 // Cloudflare with nothing extra to open) via @upstash/ratelimit.
 //
@@ -29,7 +30,8 @@ if (!rateLimitingEnabled) {
   console.warn(
     '[rateLimit] UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set — ' +
       'rate limiting is DISABLED. /api/submissions, /api/submissions/[id]/verify, ' +
-      'and /api/search are currently unlimited. Set both (see .env.example) before going public.'
+      '/api/submissions/[id]/patch, and /api/search are currently unlimited. Set both ' +
+      '(see .env.example) before going public.'
   );
 }
 
@@ -42,6 +44,7 @@ const g = globalThis as unknown as {
     submissions: Ratelimit;
     verify: Ratelimit;
     search: Ratelimit;
+    patchUpload: Ratelimit;
   } | null;
 };
 
@@ -70,6 +73,19 @@ const limiters =
           limiter: Ratelimit.slidingWindow(10, '10 m'),
           analytics: true,
           prefix: 'ratelimit:submissions',
+        }),
+        // Also auth-gated already (owner-while-PENDING or admin — see
+        // route.ts), keyed by user id for the same reason as submissions.
+        // Closer to submissions than to verify in cost per request: this
+        // reads a full file into memory, hashes it, runs the magic-byte
+        // check, and writes to disk, rather than a single small DB write —
+        // same 10-per-10-minutes starting point as submissions rather than
+        // verify's more generous allowance.
+        patchUpload: new Ratelimit({
+          redis,
+          limiter: Ratelimit.slidingWindow(10, '10 m'),
+          analytics: true,
+          prefix: 'ratelimit:patch-upload',
         }),
         // Same reasoning as submissions (auth-gated already, key by user id
         // not IP) — but a verify/vote action is cheaper and a genuinely
@@ -127,6 +143,10 @@ export function checkVerifyRateLimit(identifier: string): Promise<RateLimitResul
 
 export function checkSearchRateLimit(identifier: string): Promise<RateLimitResult> {
   return check(limiters?.search, identifier);
+}
+
+export function checkPatchUploadRateLimit(identifier: string): Promise<RateLimitResult> {
+  return check(limiters?.patchUpload, identifier);
 }
 
 /**

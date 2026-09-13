@@ -37,8 +37,33 @@ services:
         condition: service_healthy
     ports:
       - "3000:3000"
+    volumes:
+      # Uploaded patch files (POST /api/submissions/[id]/patch) — a BIND
+      # MOUNT (a real folder on this host), not a Docker-managed named
+      # volume, by request: this puts the files at a path you choose
+      # directly on disk, browsable/editable with nothing more than a
+      # normal file manager or `ls` — no `docker exec`, no `docker volume
+      # inspect`. Defaults to ./patch-storage (relative to wherever this
+      # compose file lives) if PATCH_STORAGE_HOST_DIR isn't set — set that
+      # in your .env to point somewhere else, e.g.
+      # /examplefolder/Patches. Files are named
+      # {sha1}__{hack name and version, sanitized}.{format} — e.g.
+      # 3a7f9c1b...e2__Super-Mario-World-Kaizo-Edition-v2-0.bps — so the
+      # folder is readable at a glance; the hash prefix is what the app
+      # actually uses to find the file again, the rest is cosmetic. See
+      # src/lib/patchStorage.ts (buildPatchDisplaySlug).
+      #
+      # IMPORTANT — bind mounts don't inherit the image's ownership the way
+      # a named volume would: whatever host directory this points at needs
+      # to be writable by uid 1001 (the container's non-root nextjs user)
+      # BEFORE the app starts, or every upload will fail with a permission
+      # error. On the host: `mkdir -p <the dir>` then either
+      # `sudo chown 1001:1001 <the dir>` (cleanest) or `chmod 777 <the dir>`
+      # (simpler, fine for a single-user personal server).
+      - ${PATCH_STORAGE_HOST_DIR:-./patch-storage}:/app/data/patches
     environment:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/romhackdat
+      PATCH_STORAGE_DIR: /app/data/patches
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Set NEXTAUTH_SECRET in .env}
       # Same reasoning as the LAN-access setup outside Docker: without this,

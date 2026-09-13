@@ -18,23 +18,24 @@
 // archive-extraction pipeline it shares with three other components — worth
 // keeping that way while a separate session is actively working in that
 // exact area (see handoff).
+//
+// sha1Hex itself moved to patchTypes.ts (September 9 — section 2aw): this
+// file and PatchFileUpload.tsx (src/components/) each had their own
+// near-identical copy, both silently swallowing the one failure mode worth
+// telling apart from any other — crypto.subtle doesn't exist outside a
+// secure context (HTTPS, or localhost specifically), which a self-hosted
+// app tested by hitting the container directly hits easily. One shared,
+// diagnosed implementation now; this file imports it rather than keeping
+// its own.
 import React, { useCallback, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { Upload, FileCheck, AlertCircle, Loader2 } from 'lucide-react';
-import { patchTypeFromFilename, type PatchTypeValue } from '@/lib/patchTypes';
+import { patchTypeFromFilename, sha1Hex, HashingUnavailableError, type PatchTypeValue } from '@/lib/patchTypes';
 
 export interface ParsedPatch {
   patchType: PatchTypeValue | null;
   patchFilename: string;
   patchSha1: string;
-}
-
-async function sha1Hex(file: File): Promise<string> {
-  const buf = await file.arrayBuffer();
-  const digest = await crypto.subtle.digest('SHA-1', buf);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
 }
 
 export function PatchDropzone({ onParsed }: { onParsed: (result: ParsedPatch) => void }) {
@@ -53,8 +54,13 @@ export function PatchDropzone({ onParsed }: { onParsed: (result: ParsedPatch) =>
       const result: ParsedPatch = { patchType, patchFilename: file.name, patchSha1 };
       setLastResult(result);
       onParsed(result);
-    } catch {
-      setError("Couldn't read that file — please try again, or fill the fields in manually below.");
+    } catch (err) {
+      console.error('[PatchDropzone] failed to hash file locally:', err);
+      setError(
+        err instanceof HashingUnavailableError
+          ? err.message
+          : "Couldn't read that file — please try again, or fill the fields in manually below."
+      );
     } finally {
       setProcessing(false);
     }

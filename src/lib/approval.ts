@@ -80,6 +80,68 @@ export async function triggerHasheousPushForSubmission(submissionId: string) {
   }
 }
 
+// ─── Post-approval Hasheous auto-push for an alternate format ────────────────
+// Same shape and same "never blocks the caller, fire-and-forget" rule as
+// triggerHasheousPushForSubmission above — called after an AlternateFormat
+// is approved (see POST .../formats/[formatId]/review), never inside that
+// route's own await chain in a way that could make a slow/failed Hasheous
+// call affect the approval response.
+//
+// The whole point: an approved alternate format (a CHD, say) is the exact
+// same underlying game as its parent submission, just a different container
+// — so it gets pushed to Hasheous with the SAME mapping IDs the parent
+// already has, using the alternate format's OWN hash. This is what actually
+// makes Hasheous itself (not just HackHash's own pages) recognize that hash
+// as the same game, which matters independently of HackHash's own exports
+// once Hasheous is importing DAT files that will contain this hash anyway.
+//
+// DELIBERATELY does NOT call recordAcceptedPushResult/recordPushResult.
+// Those write hasheousPushedAt/hasheousPushedFields/hasheousPushStatus onto
+// the GameMapping row, and pullMappingForSubmission's own verification logic
+// (hasheousSync.ts) later compares a PULL — using the SUBMISSION's OWN hash,
+// via lookupByHashes — against whatever was last recorded there. Recording
+// an alternate format's push through that same mechanism would silently
+// corrupt that tracking: the next scheduled pull would be comparing
+// Hasheous's response for the PRIMARY hash against a snapshot that was
+// actually about a DIFFERENT hash, and could incorrectly flip the parent's
+// own push status. There is ONE hasheousPushStatus per GameMapping, and it
+// has to keep meaning "the parent submission's own push," not get shared
+// across every hash that happens to point at the same GameMapping row. This
+// push is genuinely best-effort/fire-and-forget with no formal confirmation
+// tracking, by necessity — not an oversight, and not a smaller version of
+// what the primary push gets, just a differently-scoped one.
+export async function triggerHasheousPushForAlternateFormat(alternateFormatId: string) {
+  if (!process.env.HASHEOUS_API_KEY) return;
+  try {
+    const af = await prisma.alternateFormat.findUnique({
+      where: { id: alternateFormatId },
+      select: {
+        crc32: true, md5: true, sha1: true, format: true,
+        submission: { select: { hackName: true, gameMapping: true } },
+      },
+    });
+    if (!af?.submission.gameMapping) return;
+    const m = af.submission.gameMapping as any;
+    const hasMappings = [m.igdbId, m.theGamesDBId, m.giantBombId, m.launchboxId, m.screenScraperId, m.steamGridDBId, m.retroAchievementsId, m.gogId, m.epicGamesId].some(Boolean);
+    if (!hasMappings) return;
+    const env = (process.env.HASHEOUS_ENV as HasheousEnv | undefined) ?? 'beta';
+    const result = await pushMappingToHasheous({
+      hashes: { crc32: af.crc32, md5: af.md5, sha1: af.sha1 },
+      mappings: {
+        igdbId: m.igdbId ?? undefined, theGamesDBId: m.theGamesDBId ?? undefined,
+        giantBombId: m.giantBombId ?? undefined, launchboxId: m.launchboxId ?? undefined,
+        screenScraperId: m.screenScraperId ?? undefined, steamGridDBId: m.steamGridDBId ?? undefined,
+        retroAchievementsId: m.retroAchievementsId ?? undefined,
+        gogId: m.gogId ?? undefined, epicGamesId: m.epicGamesId ?? undefined,
+      },
+    }, env);
+    if (!result.ok) console.warn(`[hasheous/auto-push-alt-format] ${af.submission.hackName} [${af.format}]:`, result.error);
+    else console.log(`[hasheous/auto-push-alt-format] pushed ${af.submission.hackName} [${af.format}] — accepted=[${(result.accepted ?? []).join(', ')}]${Object.keys(result.rejected ?? {}).length ? ` rejected=${JSON.stringify(result.rejected)}` : ''}`);
+  } catch (err: any) {
+    console.error(`[hasheous/auto-push-alt-format] error for ${alternateFormatId}:`, err?.message);
+  }
+}
+
 interface ApprovableSubmission {
   id: string;
   hackName: string;

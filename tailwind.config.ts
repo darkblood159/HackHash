@@ -53,10 +53,24 @@ const config: Config = {
           disputed: '#f97316',
           'disputed-bg': 'rgba(249, 115, 22, 0.1)',
         },
+        // Deliberately outside the status palette above and distinct from
+        // phosphor (the site's one other bright accent) — used only for
+        // the "you can patch this ROM right now" CTA (section 2ba), where
+        // the whole point is to visually NOT look like any other button
+        // or status indicator on the page. Picked pink/magenta
+        // specifically because nothing else in this palette is anywhere
+        // near it, unlike amber (too close to status.pending) or orange
+        // (already status.disputed) — reusing either could read as
+        // meaning something it doesn't.
+        highlight: {
+          DEFAULT: '#ec4899',
+          bright: '#f472b6',
+        },
       },
       boxShadow: {
         phosphor: '0 0 20px rgba(0, 208, 132, 0.2)',
         'phosphor-sm': '0 0 8px rgba(0, 208, 132, 0.15)',
+        highlight: '0 0 20px rgba(236, 72, 153, 0.35)',
         card: '0 1px 3px rgba(0, 0, 0, 0.5)',
         'card-hover': '0 4px 16px rgba(0, 0, 0, 0.6)',
       },

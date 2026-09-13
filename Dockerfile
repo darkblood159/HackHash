@@ -49,6 +49,17 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/next.config.js ./next.config.js
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
+# Pre-created before the chown below so the image itself is self-consistent
+# (a named volume mounted here, or no mount at all, would come up writable
+# by the nextjs user either way). NOTE: docker-compose.yml/
+# portainer-stack.yml actually use a BIND MOUNT for patch storage, not a
+# named volume — a bind mount does NOT inherit this image-baked ownership,
+# it just exposes the host directory as-is. For the bind mount to actually
+# be writable, the HOST directory itself needs to be owned by (or writable
+# by) uid 1001 — see the comment on the volume mount in docker-compose.yml
+# for the exact host-side command.
+RUN mkdir -p /app/data/patches
+
 RUN chmod +x docker-entrypoint.sh && chown -R nextjs:nodejs /app
 
 USER nextjs

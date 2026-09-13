@@ -322,6 +322,19 @@ function ArchivePickerCard({
 
 interface ROMProcessorProps {
   onFileProcessed?: (info: ROMFileInfo) => void;
+  // Additive, opt-in — every existing consumer (HomeHero, BaseRomPicker,
+  // SubmitForm, VerifyPanel, SearchInterface) only ever needed the
+  // computed hashes, never the file's actual bytes, so onFileProcessed
+  // alone was enough for all five. The browser patch-apply flow (section
+  // 2ay) is the first consumer that needs to DO something with the bytes
+  // themselves (apply a patch to them) rather than just verify a hash —
+  // reusing this component's existing archive-extraction + streaming-hash
+  // pipeline for that (rather than re-deriving it, exactly the mistake
+  // this project has been careful to avoid before — see section 2ap)
+  // meant adding this one new callback rather than forking the component.
+  // None of the five existing consumers pass it, so this is zero risk to
+  // any of them.
+  onFileReady?: (file: File, info: ROMFileInfo) => void;
   showUseButton?: boolean;
   label?: string;
   hint?: string;
@@ -339,6 +352,7 @@ interface TrackedFile extends ROMFileInfo {
 
 export function ROMProcessor({
   onFileProcessed,
+  onFileReady,
   showUseButton = true,
   label,
   hint,
@@ -392,10 +406,11 @@ export function ROMProcessor({
       };
       updateEntry(key, result);
       onFileProcessed?.(result);
+      onFileReady?.(hashableFile, result);
     } catch {
       updateEntry(key, { processing: false, error: 'Processing failed — please try again.' });
     }
-  }, [onFileProcessed, updateEntry]);
+  }, [onFileProcessed, onFileReady, updateEntry]);
 
   const processFile = useCallback(async (file: File) => {
     const format = classifyArchive(file.name);

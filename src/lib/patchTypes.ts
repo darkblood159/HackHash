@@ -53,3 +53,40 @@ export function patchTypeFromFilename(filename: string): PatchTypeValue | null {
   const ext = filename.slice(idx + 1).toLowerCase();
   return PATCH_EXTENSION_MAP[ext] ?? null;
 }
+
+// Thrown by sha1Hex specifically for the one failure mode worth telling
+// the person apart from any other: crypto.subtle simply doesn't exist
+// outside a "secure context" (HTTPS, or localhost — that one's carved out
+// as an exception specifically for local development). A self-hosted app
+// tested by hitting the container directly (a bare LAN IP or a plain
+// http:// URL, before or without the reverse proxy terminating TLS in
+// front of it) hits this every time, and crypto.subtle.digest(...) throws
+// on `undefined`, not with any message describing why. Callers should
+// show `.message` verbatim for this one; it's already written for a
+// person to read, not a log.
+export class HashingUnavailableError extends Error {}
+
+// PatchDropzone.tsx and the newer PatchFileUpload.tsx each had their own
+// near-identical copy of this exact function, both wrapped in a bare
+// `catch { setError("Couldn't read that file...") }` with no way to tell
+// "this browser genuinely can't do this here" apart from any other
+// failure — which is exactly the bug report that led to consolidating
+// them here instead of just patching the message in one of the two
+// places and leaving the other's copy to rot with the same gap. One
+// implementation now; both components import it.
+export async function sha1Hex(file: File): Promise<string> {
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new HashingUnavailableError(
+      "This page isn't loaded over a secure connection, so the browser won't allow hashing " +
+        'files here. This works over HTTPS, or over plain http://localhost during local ' +
+        "development — but not over a bare IP address or hostname without HTTPS, which is a " +
+        'common way to end up testing a self-hosted app directly against the container, ' +
+        'ahead of (or bypassing) whatever normally terminates TLS in front of it.'
+    );
+  }
+  const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-1', buf);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}

@@ -2,6 +2,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { prisma } from '@/lib/prisma';
+import type { Prisma } from '@prisma/client';
 import { Download } from 'lucide-react';
 import { PlatformBadge } from '@/components/ui/PlatformBadge';
 import { TagBadge } from '@/components/ui/TagBadge';
@@ -32,18 +33,59 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
     : undefined;
   const perPage = 30;
 
-  const where = {
+  // Explicitly typed rather than left for TypeScript to infer: this array
+  // mixes plain scalar filters (machineName/sha1/md5/crc32) with one element
+  // that reaches through a relation (submission.alternateFormats.some).
+  // Without a target type, TypeScript infers each element's type from its
+  // own literal shape and unions them — which does NOT structurally match
+  // Prisma's real generated ApprovedEntryWhereInput, because relation
+  // filters use an internal `Without<A,B> & B | Without<B,A> & A`-style
+  // exclusive-union trick that only resolves correctly when each object
+  // literal is checked directly AGAINST that type as it's written
+  // (contextual typing), not inferred first and compared after. Annotated
+  // directly on this array — not just on the outer `where` below — so
+  // contextual typing applies immediately at the array literal itself,
+  // rather than depending on it correctly flowing down through a nested
+  // conditional spread (`...(q ? { OR: [...] } : {})`), which is a more
+  // indirect path for TypeScript to resolve the same way. This compiled
+  // fine against this session's own loose verification stub (which types
+  // every Prisma call as accepting `any`, see CLAUDE_HANDOFF.txt) but
+  // failed a real `npm run build` against the actual generated client —
+  // see the handoff's own lessons for why that gap exists and what it
+  // means for future work touching a `where`/`data` object with a relation
+  // filter inside an OR/AND array specifically.
+  const searchConditions: Prisma.ApprovedEntryWhereInput[] = q
+    ? [
+        { machineName: { contains: q, mode: 'insensitive' as const } },
+        { sha1: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
+        { md5: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
+        { crc32: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
+        // Also match an approved alternate format's own hash (e.g. a CHD or
+        // RVZ someone actually has) — a flat DAT-style search that only
+        // ever matched the ORIGINAL file's hash would silently fail for
+        // anyone whose copy is a registered, verified alternate format
+        // instead. See the AlternateFormat model's own comment in
+        // prisma/schema.prisma.
+        {
+          submission: {
+            alternateFormats: {
+              some: {
+                status: 'APPROVED',
+                OR: [
+                  { sha1: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
+                  { md5: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
+                  { crc32: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
+                ],
+              },
+            },
+          },
+        },
+      ]
+    : [];
+
+  const where: Prisma.ApprovedEntryWhereInput = {
     submission: { deletedAt: null },
-    ...(q
-      ? {
-          OR: [
-            { machineName: { contains: q, mode: 'insensitive' as const } },
-            { sha1: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
-            { md5: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
-            { crc32: { contains: q.toLowerCase(), mode: 'insensitive' as const } },
-          ],
-        }
-      : {}),
+    ...(searchConditions.length ? { OR: searchConditions } : {}),
     ...(platform ? { platform: platform as any } : {}),
   };
 
@@ -74,6 +116,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
           hackFamilyId: true,
           hackFamily: { select: { name: true } },
           tags: { select: { tag: true } },
+          alternateFormats: { where: { status: 'APPROVED' }, select: { id: true, format: true } },
         },
       },
     },
@@ -181,6 +224,15 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
                   {versionCount > 1 && (
                     <span className="ml-2 text-[10px] text-text-muted uppercase tracking-wider px-1.5 py-0.5 rounded bg-bg-elevated align-middle">
                       {versionCount} versions
+                    </span>
+                  )}
+                  {entry.submission.alternateFormats.length > 0 && (
+                    <span className="ml-2 inline-flex gap-1 align-middle" title="Also verified in these formats">
+                      {entry.submission.alternateFormats.map((af) => (
+                        <span key={af.id} className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-phosphor/10 text-phosphor">
+                          {af.format}
+                        </span>
+                      ))}
                     </span>
                   )}
                 </td>
