@@ -367,6 +367,9 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               </h2>
               <div className="space-y-0">
                 <HashRow label="Name" value={submission.baseRom.name} />
+                {submission.baseRom.fileExtension && (
+                  <HashRow label="Format" value={`.${submission.baseRom.fileExtension}`} />
+                )}
                 <HashRow label="CRC32" value={submission.baseRom.crc32} />
                 <HashRow label="MD5" value={submission.baseRom.md5} />
                 <HashRow label="SHA1" value={submission.baseRom.sha1} />
@@ -486,7 +489,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
             }}
             currentMapping={submission.gameMapping as any}
             currentFamily={submission.hackFamily}
-            currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status } : null}
+            currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
             currentTags={submission.tags.map((t: any) => t.tag.slug)}
             currentTranslationLanguages={submission.translationLanguages}
             initialRequests={submission.changeRequests as any}
@@ -555,7 +558,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               mapping={submission.gameMapping as any}
               tags={submission.tags.map((t: any) => t.tag.slug)}
               currentFamily={submission.hackFamily}
-              currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status } : null}
+              currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
               hasOtherVersions={siblingVersions.length > 0}
             />
           )}

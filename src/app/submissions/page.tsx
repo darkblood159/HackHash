@@ -37,7 +37,7 @@ export default async function SubmissionsPage({
   const baseRomFilter = searchParams.baseRomId
     ? await prisma.baseRom.findUnique({
         where: { id: searchParams.baseRomId },
-        select: { id: true, name: true, platform: true },
+        select: { id: true, name: true, platform: true, fileExtension: true },
       })
     : null;
 
@@ -82,7 +82,9 @@ export default async function SubmissionsPage({
         {baseRomFilter && (
           <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-phosphor/30 bg-phosphor/5 text-xs">
             <span className="text-text-secondary">
-              Showing hacks that use <span className="text-phosphor font-medium">{baseRomFilter.name}</span> as their base ROM
+              Showing hacks that use <span className="text-phosphor font-medium">{baseRomFilter.name}</span>
+              {baseRomFilter.fileExtension && <span className="text-text-muted font-mono"> (.{baseRomFilter.fileExtension})</span>}
+              {' '}as their base ROM
             </span>
             <PlatformBadge platform={baseRomFilter.platform} size="sm" />
             <Link href={clearBaseRomHref} className="ml-auto text-text-muted hover:text-phosphor underline shrink-0">

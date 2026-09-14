@@ -38,6 +38,17 @@ interface Staged {
   guessedType: string | null;
 }
 
+// Mirrors the `patchTypeMismatch` object the upload route now sends
+// alongside `error` on a 422 declared-vs-detected mismatch — see
+// route.ts's own comment on that field. Kept local (not imported from
+// patchTypes.ts) since this is just an echo of two already-known
+// PatchTypeValue strings, not a new concept this component needs a
+// shared type for.
+interface PatchTypeMismatch {
+  declaredType: string;
+  detectedType: string;
+}
+
 export function PatchFileUpload({
   submissionId,
   canManage,
@@ -52,11 +63,17 @@ export function PatchFileUpload({
   const [staged, setStaged] = useState<Staged | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Only ever set from the upload route's own `patchTypeMismatch` field —
+  // see the "Use {detectedType} instead" button below. Cleared any time a
+  // fresh attempt starts, same reset points as `error` itself, so it can
+  // never linger and describe an attempt that's no longer current.
+  const [mismatch, setMismatch] = useState<PatchTypeMismatch | null>(null);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const stageFile = useCallback(async (file: File) => {
     setError(null);
+    setMismatch(null);
     setBusy(true);
     try {
       const sha1 = await sha1Hex(file);
@@ -91,6 +108,7 @@ export function PatchFileUpload({
     if (!staged) return;
     setBusy(true);
     setError(null);
+    setMismatch(null);
     try {
       const formData = new FormData();
       formData.append('file', staged.file);
@@ -101,6 +119,14 @@ export function PatchFileUpload({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(data?.error || 'Upload failed — please try again.');
+        // Present when this 422 is specifically a declared-vs-detected
+        // patch type mismatch (see route.ts) — drives the "Use
+        // {detectedType} instead" button below. Absent for every other
+        // error shape (wrong sha1, unrecognized format, size limit,
+        // permission, etc.), which still just show `error` as before.
+        if (data?.patchTypeMismatch?.declaredType && data?.patchTypeMismatch?.detectedType) {
+          setMismatch(data.patchTypeMismatch as PatchTypeMismatch);
+        }
         return;
       }
       setStaged(null);
@@ -111,6 +137,58 @@ export function PatchFileUpload({
       setBusy(false);
     }
   }, [staged, submissionId, router]);
+
+  // Fixes the exact mismatch the upload route just reported by correcting
+  // the submission's OWN declared patchType to whatever the file's real
+  // bytes are, then retrying the same still-staged upload — instead of
+  // making the person go find the edit panel / change-request form
+  // themselves just to clear or fix one field. Uses the existing PATCH
+  // /api/submissions/[id] endpoint (already accepts patchType, per
+  // src/lib/fieldLimits.ts) rather than adding a new endpoint for this.
+  //
+  // NOT gated on a client-computed permission check — whoever can reach
+  // this component at all can already reach the real fix manually via the
+  // edit panel or a change request; this is a convenience shortcut for
+  // that same action, and PATCH /api/submissions/[id] is the actual
+  // authority regardless. A viewer who CAN manage the patch FILE but
+  // ISN'T the owner-while-PENDING or an admin (a VERIFIER specifically —
+  // canManagePatchFile.ts grants file management to admins and verifiers
+  // alike, but the PATCH route's own edit permission is owner-while-
+  // PENDING-or-admin only, not verifier) will get a real 403 back here;
+  // handled below by surfacing that failure plainly rather than assuming
+  // success, same as every other network call in this component.
+  const useDetectedTypeAndRetry = useCallback(async () => {
+    if (!mismatch) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/submissions/${submissionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        // patchType is per-version metadata, not a shared/family field
+        // (CLAUDE_HANDOFF.txt section 2f) — applyToAllVersions wouldn't
+        // do anything either way here, but false is the more honest
+        // value to send for a single-field metadata correction like this.
+        body: JSON.stringify({ patchType: mismatch.detectedType, applyToAllVersions: false }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(
+          `Couldn't update the declared patch type automatically (${data?.error || 'unknown error'}). ` +
+            'An admin can change it from the edit panel, or clear that field and re-upload.'
+        );
+        return;
+      }
+      setMismatch(null);
+      await upload();
+    } catch {
+      setError(
+        "Couldn't update the declared patch type automatically — please check your connection and try again."
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [mismatch, submissionId, upload]);
 
   const remove = useCallback(async () => {
     setBusy(true);
@@ -231,9 +309,20 @@ export function PatchFileUpload({
         ))}
 
       {error && (
-        <div className="flex items-center gap-2 text-xs text-status-rejected">
-          <AlertCircle size={12} className="shrink-0" />
-          {error}
+        <div className="space-y-1.5 text-xs text-status-rejected">
+          <div className="flex items-center gap-2">
+            <AlertCircle size={12} className="shrink-0" />
+            <span>{error}</span>
+          </div>
+          {mismatch && (
+            <button
+              onClick={useDetectedTypeAndRetry}
+              disabled={busy}
+              className="rounded-md border border-status-rejected/40 px-2.5 py-1 text-xs font-medium text-status-rejected hover:bg-status-rejected/10 disabled:opacity-50"
+            >
+              {busy ? 'Updating…' : `Use ${mismatch.detectedType} instead of ${mismatch.declaredType} & upload`}
+            </button>
+          )}
         </div>
       )}
     </div>

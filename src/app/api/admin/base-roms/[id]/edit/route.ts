@@ -32,8 +32,16 @@ import { PLATFORMS } from '@/types';
 const editSchema = z.object({
   name: z.string().min(1).max(300).optional(),
   platform: z.enum(PLATFORMS).optional(),
-}).refine((data) => data.name !== undefined || data.platform !== undefined, {
-  message: 'Provide a name and/or platform to update',
+  // Same non-identity-metadata category as name/platform above (see this
+  // file's own header comment on why crc32/md5/sha1 are deliberately NOT
+  // here) — an admin correcting or backfilling what a submitter's file
+  // extension actually was, same as they'd fix a typo'd name. An empty
+  // string clears it back to null (submitted rows can be wrong; DAT-
+  // imported rows never had one to begin with) rather than being rejected
+  // as "too short," which is why this isn't `.min(1)` like name is.
+  fileExtension: z.string().trim().max(10).optional(),
+}).refine((data) => data.name !== undefined || data.platform !== undefined || data.fileExtension !== undefined, {
+  message: 'Provide a name, platform, and/or file extension to update',
 });
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
@@ -63,6 +71,12 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     data: {
       ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
       ...(parsed.data.platform !== undefined ? { platform: parsed.data.platform } : {}),
+      // Lowercased, leading dot stripped (forgives an admin typing ".z64"
+      // instead of "z64" — same input either way should mean the same
+      // thing), empty string clears it back to null.
+      ...(parsed.data.fileExtension !== undefined
+        ? { fileExtension: parsed.data.fileExtension.toLowerCase().replace(/^\./, '') || null }
+        : {}),
     },
   });
 
@@ -71,12 +85,12 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       action: 'BASE_ROM_EDITED',
       details: {
         baseRomId: params.id,
-        before: { name: baseRom.name, platform: baseRom.platform },
-        after: { name: updated.name, platform: updated.platform },
+        before: { name: baseRom.name, platform: baseRom.platform, fileExtension: baseRom.fileExtension },
+        after: { name: updated.name, platform: updated.platform, fileExtension: updated.fileExtension },
       },
       userId: session.user.id,
     },
   });
 
-  return NextResponse.json({ ok: true, name: updated.name, platform: updated.platform });
+  return NextResponse.json({ ok: true, name: updated.name, platform: updated.platform, fileExtension: updated.fileExtension });
 }

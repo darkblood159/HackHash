@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
     prisma.baseRom.findMany({
       where: { status: status as any },
       select: {
-        id: true, platform: true, name: true, crc32: true, md5: true, sha1: true, status: true,
+        id: true, platform: true, name: true, fileExtension: true, crc32: true, md5: true, sha1: true, status: true,
         createdAt: true, rejectionReason: true,
         submittedBy: { select: { id: true, name: true } },
         _count: { select: { submissions: true } },

@@ -388,6 +388,21 @@ model BaseRom {
   id              String        @id @default(cuid())
   platform        Platform
   name            String
+  // The actual container/byte-order format of the specific file that was
+  // hashed — lowercase, no leading dot (e.g. "z64", not ".z64" or "N64").
+  // Matters most for platforms with multiple non-interchangeable ROM
+  // formats that hash completely differently despite being "the same
+  // game" (N64's z64/n64/v64 byte-order variants are the clearest case,
+  // but far from the only one) — telling a submitter which one a base
+  // rom needs saves them hashing the wrong copy. Nullable and best-effort:
+  // rows created before this field existed, and rows created by the DAT
+  // importer (which has no original filename to derive one from), simply
+  // have no value here rather than a guessed one. Derived from the
+  // submitter's own filename at hash time (see extensionOf in
+  // src/lib/romExtensions.ts, reused rather than duplicated) — never
+  // validated against ROM_FILE_EXTENSIONS in that same file, since this
+  // is informational metadata, not a gate on what can be submitted.
+  fileExtension   String?
   crc32           String
   md5             String
   sha1            String        @unique

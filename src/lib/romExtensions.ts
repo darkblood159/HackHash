@@ -96,7 +96,14 @@ const KNOWN_NON_ROM_EXTENSIONS: ReadonlySet<string> = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'bmp', 'ico', 'webp',
 ]);
 
-function extensionOf(filename: string): string | null {
+// Exported (this file's only export that isn't ROM-classification-specific)
+// for BaseRom's fileExtension capture (src/components/BaseRomPicker.tsx) to
+// reuse directly rather than growing its own third near-duplicate copy of
+// "lowercase whatever's after the last dot" — src/lib/alternateFormats.ts's
+// guessFormatLabel already has its own inline copy for a genuinely
+// different purpose (a prefill guess for a free-text label the submitter
+// can override), which is why that one wasn't consolidated into this one.
+export function extensionOf(filename: string): string | null {
   const idx = filename.lastIndexOf('.');
   if (idx <= 0) return null;
   return filename.slice(idx + 1).toLowerCase();

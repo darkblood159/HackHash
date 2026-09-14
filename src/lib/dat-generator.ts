@@ -103,6 +103,7 @@ interface DetailedEntry {
     baseRom: {
       name: string;
       platform: string;
+      fileExtension: string | null;
       crc32: string;
       md5: string;
       sha1: string;
@@ -309,6 +310,7 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
           ? {
               name: sub.baseRom.name,
               platform: sub.baseRom.platform,
+              fileExtension: sub.baseRom.fileExtension,
               crc32: sub.baseRom.crc32,
               md5: sub.baseRom.md5,
               sha1: sub.baseRom.sha1,

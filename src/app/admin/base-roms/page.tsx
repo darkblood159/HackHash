@@ -10,6 +10,7 @@ interface BaseRomRow {
   id: string;
   platform: string;
   name: string;
+  fileExtension: string | null;
   crc32: string;
   md5: string;
   sha1: string;
@@ -38,6 +39,7 @@ export default function AdminBaseRomsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editPlatform, setEditPlatform] = useState('');
+  const [editFileExtension, setEditFileExtension] = useState('');
   const [removingId, setRemovingId] = useState<string | null>(null);
 
   const load = () => {
@@ -73,6 +75,7 @@ export default function AdminBaseRomsPage() {
     setEditingId(r.id);
     setEditName(r.name);
     setEditPlatform(r.platform);
+    setEditFileExtension(r.fileExtension ?? '');
     setRejectingId(null);
     setRemovingId(null);
   };
@@ -84,7 +87,7 @@ export default function AdminBaseRomsPage() {
       const res = await fetch(`/api/admin/base-roms/${id}/edit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: editName.trim(), platform: editPlatform }),
+        body: JSON.stringify({ name: editName.trim(), platform: editPlatform, fileExtension: editFileExtension.trim() }),
       });
       if (!res.ok) { const d = await res.json(); setError(d.error ?? 'Save failed'); return; }
       setEditingId(null);
@@ -172,7 +175,12 @@ export default function AdminBaseRomsPage() {
               <div className="flex items-start gap-3">
                 <Disc3 size={18} className="text-phosphor shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-text-primary font-medium">{r.name}</p>
+                  <p className="text-text-primary font-medium">
+                    {r.name}
+                    {r.fileExtension && (
+                      <span className="ml-1.5 text-xs font-mono text-text-muted">.{r.fileExtension}</span>
+                    )}
+                  </p>
                   <p className="text-xs text-text-muted mt-0.5">
                     {r.platform} · submitted by {r.submittedBy?.name ?? 'unknown'} ·{' '}
                     {new Date(r.createdAt).toLocaleDateString()}
@@ -247,6 +255,13 @@ export default function AdminBaseRomsPage() {
                 >
                   {PLATFORMS.map((p) => <option key={p} value={p}>{PLATFORM_LABELS[p]}</option>)}
                 </select>
+                <input
+                  value={editFileExtension}
+                  onChange={(e) => setEditFileExtension(e.target.value)}
+                  placeholder="Extension, e.g. z64"
+                  maxLength={10}
+                  className="w-36 px-3 py-1.5 rounded-md bg-bg-base border border-border text-text-primary text-xs placeholder:text-text-muted focus:border-phosphor/50"
+                />
                 <button
                   disabled={busyId === r.id || !editName.trim()}
                   onClick={() => saveEdit(r.id)}

@@ -10,12 +10,18 @@
 import { useState, useEffect, useRef } from 'react';
 import { ROMProcessor } from './ROMProcessor';
 import { Search, CheckCircle2, Clock, XCircle } from 'lucide-react';
+import { extensionOf } from '@/lib/romExtensions';
 import type { ROMFileInfo } from '@/types';
 
 export interface SelectedBaseRom {
   id: string;
   name: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  // Optional/best-effort — see the BaseRom model's own comment in
+  // prisma/schema.prisma. Absent (undefined) for any caller constructed
+  // before this field existed; that's fine everywhere it's displayed
+  // below, all of which already treat it as optional.
+  fileExtension?: string | null;
 }
 
 interface BaseRomOption {
@@ -24,6 +30,7 @@ interface BaseRomOption {
   crc32: string;
   md5: string;
   sha1: string;
+  fileExtension: string | null;
 }
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
@@ -142,7 +149,10 @@ export function BaseRomPicker({
       const res = await fetch('/api/base-roms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ platform, crc32: info.crc32, md5: info.md5, sha1: info.sha1, name }),
+        body: JSON.stringify({
+          platform, crc32: info.crc32, md5: info.md5, sha1: info.sha1, name,
+          fileExtension: extensionOf(info.filename),
+        }),
       });
       const data = await res.json();
       // Platform changed while this was in flight — e.g. a large ROM took a
@@ -160,7 +170,7 @@ export function BaseRomPicker({
         return;
       }
       setNeedsName(false);
-      onChange({ id: data.baseRomId, name: data.name, status: data.status });
+      onChange({ id: data.baseRomId, name: data.name, status: data.status, fileExtension: data.fileExtension });
     } catch {
       if (epochRef.current === epoch) setError('Network error — please try again');
     } finally {
@@ -214,11 +224,14 @@ export function BaseRomPicker({
                     e.preventDefault();
                     setQuery(o.name);
                     setOpen(false);
-                    onChange({ id: o.id, name: o.name, status: 'APPROVED' });
+                    onChange({ id: o.id, name: o.name, status: 'APPROVED', fileExtension: o.fileExtension });
                   }}
                   className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-sm text-text-primary hover:bg-bg-elevated transition-colors"
                 >
-                  <span className="truncate">{o.name}</span>
+                  <span className="truncate">
+                    {o.name}
+                    {o.fileExtension && <span className="text-text-muted">{' '}·{' '}.{o.fileExtension}</span>}
+                  </span>
                   <span className="text-[10px] font-mono text-text-muted shrink-0">{o.sha1.slice(0, 8)}…</span>
                 </button>
               ))}
@@ -272,7 +285,10 @@ export function BaseRomPicker({
 
       {value && (
         <div className="mt-2 flex items-center justify-between gap-2 p-2.5 rounded-lg border border-phosphor/20 bg-phosphor/5">
-          <span className="text-sm text-text-primary truncate">{value.name}</span>
+          <span className="text-sm text-text-primary truncate">
+            {value.name}
+            {value.fileExtension && <span className="text-text-muted font-mono text-xs"> · .{value.fileExtension}</span>}
+          </span>
           <div className="flex items-center gap-2 shrink-0">
             <StatusPill status={value.status} />
             <button

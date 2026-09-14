@@ -17,6 +17,13 @@ export interface ResolveBaseRomParams {
   crc32: string;
   md5: string;
   sha1: string;
+  // See the BaseRom model's own comment in prisma/schema.prisma. Only used
+  // when actually CREATING a new row, same as `status` below — an existing
+  // match's own fileExtension (whatever it already is, possibly null) is
+  // left untouched, matching this function's existing "an existing match
+  // is returned as-is" principle rather than silently overwriting it from
+  // whichever submitter happened to trigger the match.
+  fileExtension?: string | null;
   submittedById?: string | null;
   // Only used when actually CREATING a new row — an existing match is
   // returned as-is, its status untouched. Defaults to PENDING, since the
@@ -33,6 +40,7 @@ export interface ResolvedBaseRom {
   isNew: boolean;
   name: string;
   status: string;
+  fileExtension: string | null;
 }
 
 export async function resolveOrCreateBaseRom(
@@ -50,7 +58,7 @@ export async function resolveOrCreateBaseRom(
 
   const existing = await tx.baseRom.findUnique({ where: { sha1 } });
   if (existing) {
-    return { baseRomId: existing.id, isNew: false, name: existing.name, status: existing.status };
+    return { baseRomId: existing.id, isNew: false, name: existing.name, status: existing.status, fileExtension: existing.fileExtension };
   }
 
   // See the matching comment in resolveOrCreateFamily (src/lib/hackFamily.ts)
@@ -70,12 +78,13 @@ export async function resolveOrCreateBaseRom(
         md5: params.md5.toLowerCase().trim(),
         sha1,
         status: params.status ?? 'PENDING',
+        fileExtension: params.fileExtension ?? null,
         submittedById: params.submittedById ?? null,
         approvedById: params.approvedById ?? null,
         approvedAt: params.approvedAt ?? null,
       },
     });
-    return { baseRomId: created.id, isNew: true, name: created.name, status: created.status };
+    return { baseRomId: created.id, isNew: true, name: created.name, status: created.status, fileExtension: created.fileExtension };
   } catch (err: any) {
     // Someone else hashed and submitted the exact same base rom in the
     // brief window between the lookup above and this create — use theirs
@@ -83,7 +92,7 @@ export async function resolveOrCreateBaseRom(
     if (err?.code === 'P2002') {
       if (inTransaction) await tx.$executeRaw`ROLLBACK TO SAVEPOINT resolve_base_rom`;
       const raceWinner = await tx.baseRom.findUniqueOrThrow({ where: { sha1 } });
-      return { baseRomId: raceWinner.id, isNew: false, name: raceWinner.name, status: raceWinner.status };
+      return { baseRomId: raceWinner.id, isNew: false, name: raceWinner.name, status: raceWinner.status, fileExtension: raceWinner.fileExtension };
     }
     throw err;
   }

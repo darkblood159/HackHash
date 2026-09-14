@@ -57,6 +57,7 @@ const entrySchema = z.object({
   baseRom: z.object({
     name: z.string().min(1).max(300),
     platform: z.string(), // validated against PLATFORMS at use time; falls back to the entry's own platform if it doesn't match
+    fileExtension: z.string().max(10).optional().nullable(),
     crc32: z.string().regex(/^[0-9a-f]{8}$/i),
     md5: z.string().regex(/^[0-9a-f]{32}$/i),
     sha1: z.string().regex(/^[0-9a-f]{40}$/i),
@@ -328,6 +329,7 @@ export async function POST(req: NextRequest) {
                 {
                   platform: baseRomPlatform,
                   name: entry.baseRom.name,
+                  fileExtension: entry.baseRom.fileExtension ?? null,
                   crc32: entry.baseRom.crc32,
                   md5: entry.baseRom.md5,
                   sha1: entry.baseRom.sha1,

@@ -30,7 +30,7 @@ export async function GET(req: NextRequest) {
       status: 'APPROVED',
       ...(q ? { name: { contains: q, mode: 'insensitive' } } : {}),
     },
-    select: { id: true, name: true, crc32: true, md5: true, sha1: true },
+    select: { id: true, name: true, crc32: true, md5: true, sha1: true, fileExtension: true },
     orderBy: { name: 'asc' },
     take: 100,
   });
@@ -48,6 +48,14 @@ const submitBaseRomSchema = z.object({
   crc32: z.string().regex(/^[0-9a-f]{8}$/i, 'CRC32 must be 8 hex characters'),
   md5: z.string().regex(/^[0-9a-f]{32}$/i, 'MD5 must be 32 hex characters'),
   sha1: z.string().regex(/^[0-9a-f]{40}$/i, 'SHA-1 must be 40 hex characters'),
+  // Derived client-side from the hashed file's own name (BaseRomPicker.tsx,
+  // via extensionOf in src/lib/romExtensions.ts) the same way crc32/md5/sha1
+  // already are — never recomputed server-side since there's no file here
+  // to recompute it FROM, only trusted input, same trust model as those
+  // three. Loosely bounded rather than tightly validated: informational
+  // metadata, not an identity field, so an odd value here isn't a real
+  // problem the way a malformed hash would be.
+  fileExtension: z.string().trim().toLowerCase().regex(/^[a-z0-9]{1,10}$/i, 'Not a plausible file extension').optional().nullable(),
 });
 
 // POST /api/base-roms
@@ -86,6 +94,7 @@ export async function POST(req: NextRequest) {
   const result = await resolveOrCreateBaseRom(prisma, {
     ...parsed.data,
     name: parsed.data.name ?? '',
+    fileExtension: parsed.data.fileExtension ?? null,
     submittedById: session.user.id,
   });
 

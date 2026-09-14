@@ -170,6 +170,18 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       return NextResponse.json(
         {
           error: `This file looks like a ${detectedType} patch, but ${submission.patchType} was selected for this submission. Double-check the patch type, or leave it blank and this upload will set it.`,
+          // Structured alongside the message above so a client can offer a
+          // direct "use the detected type" fix instead of only rendering
+          // text (see PatchFileUpload.tsx). Purely additive — anything
+          // that only reads `error` behaves exactly as it did before.
+          // This is NOT a claim that the detected byte format is somehow
+          // more "correct" than what's declared — it's just the format
+          // the actual bytes really are, per detectPatchFormat(). Very
+          // often the honest explanation for this mismatch is that the
+          // real-world file simply doesn't match its own extension (e.g.
+          // a BPS patch someone named/renamed "*.ips" — a common mix-up
+          // in the wild, not evidence of anything wrong with detection).
+          patchTypeMismatch: { declaredType: submission.patchType, detectedType },
         },
         { status: 422 }
       );

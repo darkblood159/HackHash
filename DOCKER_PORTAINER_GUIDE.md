@@ -213,3 +213,66 @@ builds from within it, which sidesteps today's build-context limitation
 entirely) — worth considering if you start pushing this project to a GitHub
 or self-hosted git server. Happy to write that version of the guide if/when
 you get there.
+
+## If a migration fails on startup (P3009)
+
+Every time the `app` container starts — including every time you Recreate
+it after an update — `docker-entrypoint.sh` runs `npx prisma migrate
+deploy` before starting the server. If that gets interrupted partway
+through (the container is killed/restarted, or loses its connection to the
+database, mid-migration), Prisma marks that migration as "started but
+never confirmed finished" and refuses to run anything else — including
+migrations that had nothing to do with the interruption — until it's told
+what actually happened.
+
+Because the `app` service restarts automatically (`restart: always`), this
+usually shows up as the container endlessly restarting, with logs ending
+in something like:
+
+```
+Error: P3009 migrate found failed migrations in the target database, new migrations will not be applied.
+The `<migration_name>` migration started at ... failed
+```
+
+This does not mean anything got corrupted — it's Prisma's own bookkeeping
+being unsure, not the database. Every migration in this project is written
+to be safe to re-run. To fix it:
+
+1. **Check what the migration was actually trying to do.** Open
+   `prisma/migrations/<migration_name>/migration.sql` in the project — it's
+   plain SQL, readable without any special tooling.
+2. **Check whether it actually happened.** Connect to the `db` container
+   and check for whatever the migration was creating, e.g.:
+   ```bash
+   docker exec -it hackhash-db-1 psql -U postgres -d romhackdat -c '\d "TableNameFromTheMigration"'
+   ```
+   (swap in the real table/column name from the migration file). If it
+   describes something real, the migration's SQL DID run — Prisma just
+   never got to record that. If it says the relation doesn't exist, it did
+   NOT run.
+3. **Tell Prisma which one is true, then let it continue:**
+   ```bash
+   # If step 2 showed it DID happen:
+   docker exec -it hackhash-app-1 npx prisma migrate resolve --applied "<migration_name>"
+
+   # If step 2 showed it did NOT happen:
+   docker exec -it hackhash-app-1 npx prisma migrate resolve --rolled-back "<migration_name>"
+   ```
+   Then Recreate (or just restart) the `app` container so `migrate deploy`
+   runs again — resolved as `--rolled-back`, it'll actually run that
+   migration's SQL for real this time; resolved as `--applied`, it'll skip
+   straight to whatever comes after it.
+
+**Important:** `--applied` only tells Prisma "trust me, this already
+happened" — it does not run the SQL itself. If it's used on a migration
+that actually never ran, the database will be permanently missing whatever
+that migration was supposed to add, and the app will error the moment it
+touches that table/column. When you're not sure which one is true, do the
+`psql` check in step 2 rather than guessing — or just resolve as
+`--rolled-back` and let Prisma run it for real.
+
+If this happens with more than one migration queued up at once, only the
+FIRST one gets named in the error — resolve it, then re-run `migrate
+deploy` (Recreate the container again) to find out whether the next one in
+line also needs resolving, rather than assuming a single resolve fixed
+everything.
