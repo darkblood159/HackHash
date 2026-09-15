@@ -21,6 +21,12 @@ async function main() {
     { key: 'dat_description', value: 'Community-driven ROM Hack verification database' },
     { key: 'dat_url', value: 'https://hackhash.example.com' },
     { key: 'dat_author', value: 'HackHash Community' },
+    // Patch-upload kill switch (src/lib/siteSettings.ts) — seeded explicitly
+    // as 'false' (uploads enabled) so a fresh database's default state is
+    // documented here rather than only implied by arePatchUploadsDisabled()
+    // treating a missing row as "not disabled", same as every other
+    // setting in this list already gets an explicit seeded default.
+    { key: 'patch_uploads_disabled', value: 'false' },
   ];
 
   for (const setting of defaultSettings) {

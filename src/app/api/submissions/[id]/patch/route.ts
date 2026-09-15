@@ -34,6 +34,7 @@ import { checkPatchUploadRateLimit, checkSearchRateLimit, getClientIp, rateLimit
 import { validatePatchUpload, MAX_PATCH_FILE_SIZE_BYTES } from '@/lib/patchValidation';
 import { writePatchFile, readPatchFile, deletePatchFile, buildPatchDisplaySlug } from '@/lib/patchStorage';
 import { canManagePatchFile } from '@/lib/patchPermissions';
+import { arePatchUploadsDisabled, PATCH_UPLOADS_DISABLED_MESSAGE } from '@/lib/siteSettings';
 import type { PatchTypeValue } from '@/lib/patchTypes';
 
 // Multipart overhead for a single-file form (boundary strings, the one
@@ -77,6 +78,18 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   }
   if (session.user.isBanned) {
     return NextResponse.json({ error: 'Your account has been banned' }, { status: 403 });
+  }
+
+  // Admin kill switch (src/lib/siteSettings.ts) — checked before the rate
+  // limit is even consumed and before the submission is looked up, since
+  // there's no point charging either against an attempt that's guaranteed
+  // to be rejected. Deliberately does NOT gate DELETE (removing a file
+  // isn't "uploading" one) or GET below (downloading an already-stored
+  // patch, and the in-browser apply flow that depends on it, is the
+  // separate "patching" feature this switch is specifically NOT meant to
+  // touch — see siteSettings.ts's own comment on the scope of this).
+  if (await arePatchUploadsDisabled()) {
+    return NextResponse.json({ error: PATCH_UPLOADS_DISABLED_MESSAGE, uploadsDisabled: true }, { status: 503 });
   }
 
   const rateLimit = await checkPatchUploadRateLimit(session.user.id);

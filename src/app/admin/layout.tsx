@@ -5,7 +5,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { ShieldCheck, Users, Inbox, UploadCloud, Pencil, Globe, Layers, Disc3, Package } from 'lucide-react';
+import { ShieldCheck, Users, Inbox, UploadCloud, Pencil, Globe, Layers, Disc3, Package, Settings } from 'lucide-react';
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await getServerSession(authOptions);
@@ -60,6 +60,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         </Link>
         <Link href="/admin/users" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
           <Users size={14} /> Users
+        </Link>
+        <Link href="/admin/settings" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
+          <Settings size={14} /> Settings
         </Link>
       </div>
 

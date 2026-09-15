@@ -21,6 +21,7 @@ import { ChangeRequestSection } from '@/components/ChangeRequestSection';
 import { PatchFileUpload } from '@/components/PatchFileUpload';
 import { PatchApplyButton } from '@/components/PatchApplyButton';
 import { canManagePatchFile } from '@/lib/patchPermissions';
+import { arePatchUploadsDisabled } from '@/lib/siteSettings';
 import { MappingsDisplay } from '@/components/MappingsDisplay';
 import { languageName } from '@/lib/languages';
 import { ForceRepullButton } from '@/components/ForceRepullButton';
@@ -139,6 +140,12 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
     status: submission.status,
     patchUploadedAt: submission.patchUploadedAt,
   });
+  // Admin kill switch (src/lib/siteSettings.ts) — only hides the
+  // upload/replace dropzone below; deliberately does not affect
+  // canDownloadPatch/canPatchInBrowser just below, which is the whole
+  // point of keeping "uploading" and "the patching" as two separate
+  // things a person can pause independently of each other.
+  const uploadsDisabled = await arePatchUploadsDisabled();
   // Mirrors GET /api/submissions/[id]/patch's own gate exactly — shown
   // here only when it would actually succeed, rather than letting someone
   // go through the whole "drop your ROM" flow just to hit a 403 at the
@@ -330,6 +337,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               submissionId={submission.id}
               canManage={canManagePatch}
               hasFile={!!submission.patchUploadedAt}
+              uploadsDisabled={uploadsDisabled}
             />
           </div>
 

@@ -29,8 +29,9 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { clsx } from 'clsx';
-import { Upload, FileCheck, AlertCircle, Loader2, ShieldAlert, Trash2 } from 'lucide-react';
+import { Upload, FileCheck, AlertCircle, Loader2, ShieldAlert, Trash2, UploadCloud } from 'lucide-react';
 import { patchTypeFromFilename, sha1Hex, HashingUnavailableError } from '@/lib/patchTypes';
+import { PATCH_UPLOADS_DISABLED_MESSAGE } from '@/lib/patchUploadState';
 
 interface Staged {
   file: File;
@@ -53,10 +54,18 @@ export function PatchFileUpload({
   submissionId,
   canManage,
   hasFile,
+  uploadsDisabled = false,
 }: {
   submissionId: string;
   canManage: boolean;
   hasFile: boolean;
+  // Server-computed (src/lib/siteSettings.ts, via the page), same
+  // "controls what's shown, isn't the actual boundary" relationship
+  // `canManage` already has to the real rule — the route enforces this
+  // switch independently regardless of what this prop says. Only ever
+  // hides the drop-to-upload/replace zone; removing an already-attached
+  // file is untouched, since clearing one isn't "uploading" it.
+  uploadsDisabled?: boolean;
 }) {
   const router = useRouter();
   const [dragging, setDragging] = useState(false);
@@ -222,7 +231,12 @@ export function PatchFileUpload({
 
   return (
     <div className="space-y-2">
-      {!staged ? (
+      {uploadsDisabled && !staged ? (
+        <div className="flex items-center gap-2 rounded-lg border border-dashed border-border bg-bg-elevated px-4 py-4 text-center text-sm text-text-muted">
+          <UploadCloud size={16} className="shrink-0" />
+          <span>{PATCH_UPLOADS_DISABLED_MESSAGE}</span>
+        </div>
+      ) : !staged ? (
         <div
           onDrop={(e) => {
             e.preventDefault();
