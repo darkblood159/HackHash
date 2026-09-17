@@ -118,3 +118,34 @@ export function looksLikeKnownNonRomFile(filename: string): boolean {
   const ext = extensionOf(filename);
   return !!ext && KNOWN_NON_ROM_EXTENSIONS.has(ext);
 }
+
+// Characters that are invalid (Windows) or awkward (all platforms) inside a
+// filename — used ONLY when turning a DAT machine name into a browser
+// download filename (see buildRomDownloadFilename below). A hack's real
+// name can legitimately contain a colon in a subtitle (e.g. "Banjo-Kazooie:
+// Nostalgia 64"), which is completely fine for ApprovedEntry.machineName
+// itself (a database string, not a filename) but not fine to hand straight
+// to `<a download>`. Deliberately NOT used anywhere machineName is stored,
+// displayed, or compared — only at this one derivation point.
+const UNSAFE_FILENAME_CHARS = /[\\/:*?"<>|]/g;
+
+export function sanitizeForFilename(name: string): string {
+  return name.replace(UNSAFE_FILENAME_CHARS, '').replace(/\s+/g, ' ').trim();
+}
+
+// The single place a patched ROM's own download filename gets built —
+// see PatchApplyButton.tsx's `expectedOutput.filename`. Deliberately takes
+// the DAT machine name (ApprovedEntry.machineName, or the same
+// `${hackName} (v${version})` formula resolveMachineName itself defaults
+// to when there's no ApprovedEntry yet) rather than the submitter's own
+// raw uploaded filename — the two can differ arbitrarily, since the
+// uploaded filename is never validated against any naming convention (see
+// CLAUDE_HANDOFF.txt's Sept 15 entry on this). `extension` should come
+// from the submission's BaseRom.fileExtension when available (it reflects
+// the actual byte-order variant — z64/n64/v64 differ — being patched) and
+// fall back to extensionOf() on the submitter's own filename only when a
+// base rom's own extension isn't known.
+export function buildRomDownloadFilename(machineName: string, extension: string | null): string {
+  const safeName = sanitizeForFilename(machineName) || 'rom';
+  return extension ? `${safeName}.${extension}` : safeName;
+}

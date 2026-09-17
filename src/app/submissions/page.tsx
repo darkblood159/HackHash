@@ -11,6 +11,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { SubmissionFilters } from '@/components/SubmissionFilters';
 import { PlatformFilters } from '@/components/PlatformFilters';
 import { TagFilters } from '@/components/TagFilters';
+import { PatchFilters } from '@/components/PatchFilters';
 import { PLATFORMS } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -20,13 +21,20 @@ const STATUSES = ['PENDING', 'COMMUNITY_VERIFIED', 'RECOMMENDED', 'APPROVED', 'R
 export default async function SubmissionsPage({
   searchParams,
 }: {
-  searchParams: { status?: string; platform?: string; tag?: string; baseRomId?: string };
+  searchParams: { status?: string; platform?: string; tag?: string; baseRomId?: string; hasPatch?: string };
 }) {
   const status = searchParams.status && STATUSES.includes(searchParams.status) ? searchParams.status : undefined;
   const platform = searchParams.platform && (PLATFORMS as readonly string[]).includes(searchParams.platform)
     ? searchParams.platform
     : undefined;
   const tag = searchParams.tag;
+  // Same validate-against-a-known-set treatment as status/platform above —
+  // anything other than exactly 'yes'/'no' falls back to "no filter"
+  // rather than silently building a where clause around an unrecognized
+  // value. Checks patchUploadedAt (the real "file is attached" flag, see
+  // its own comment in prisma/schema.prisma), not patchType/patchSha1,
+  // which can be set with no file ever uploaded.
+  const hasPatch = searchParams.hasPatch === 'yes' || searchParams.hasPatch === 'no' ? searchParams.hasPatch : undefined;
 
   // Resolved (not just trusted-as-is) the same way status/platform above
   // are checked against a known-valid set before use — a stale/mistyped id
@@ -48,6 +56,8 @@ export default async function SubmissionsPage({
       ...(platform ? { platform: platform as any } : {}),
       ...(tag ? { tags: { some: { tag: { slug: tag } } } } : {}),
       ...(baseRomFilter ? { baseRomId: baseRomFilter.id } : {}),
+      ...(hasPatch === 'yes' ? { patchUploadedAt: { not: null } } : {}),
+      ...(hasPatch === 'no' ? { patchUploadedAt: null } : {}),
     },
     include: {
       submittedBy: { select: { id: true, name: true, image: true, username: true } },
@@ -65,6 +75,7 @@ export default async function SubmissionsPage({
   if (status) clearBaseRomParams.set('status', status);
   if (platform) clearBaseRomParams.set('platform', platform);
   if (tag) clearBaseRomParams.set('tag', tag);
+  if (hasPatch) clearBaseRomParams.set('hasPatch', hasPatch);
   const clearBaseRomHref = `/submissions${clearBaseRomParams.toString() ? `?${clearBaseRomParams.toString()}` : ''}`;
 
   return (
@@ -79,6 +90,7 @@ export default async function SubmissionsPage({
         </div>
         <PlatformFilters current={platform} />
         <TagFilters current={tag} />
+        <PatchFilters current={hasPatch} />
         {baseRomFilter && (
           <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-phosphor/30 bg-phosphor/5 text-xs">
             <span className="text-text-secondary">
@@ -146,6 +158,14 @@ export default async function SubmissionsPage({
             </div>
 
             <div className="relative flex items-center gap-4 shrink-0">
+              {sub.patchUploadedAt && (
+                <span
+                  className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-phosphor/10 text-phosphor"
+                  title="A patch file has been uploaded for this submission"
+                >
+                  Patch
+                </span>
+              )}
               <ScoreGauge score={sub.verificationScore} />
               <StatusBadge status={sub.status} />
             </div>

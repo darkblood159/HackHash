@@ -11,7 +11,7 @@ import { ScoreGauge } from '@/components/ui/ScoreGauge';
 import { TrustBadge } from '@/components/ui/TrustBadge';
 import { Avatar } from '@/components/ui/Avatar';
 import { formatDistanceToNow, format } from 'date-fns';
-import { ExternalLink, Github, FileText, ChevronDown, Search } from 'lucide-react';
+import { ExternalLink, Github, FileText, ChevronDown, Search, Plus } from 'lucide-react';
 import Link from 'next/link';
 import { VerifyPanel } from '@/components/VerifyPanel';
 import { AdminActions } from '@/components/AdminActions';
@@ -31,6 +31,7 @@ import { RestoreSubmissionButton } from '@/components/RestoreSubmissionButton';
 import { AlternateFormats } from '@/components/AlternateFormats';
 import ReleaseDate from '@/components/ReleaseDate';
 import { toISODateOnly } from '@/lib/hackFamily';
+import { buildRomDownloadFilename, extensionOf } from '@/lib/romExtensions';
 
 export const dynamic = 'force-dynamic';
 
@@ -163,6 +164,25 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
     canDownloadPatch
   );
 
+  // The in-browser patch flow used to download the patched ROM under the
+  // submitter's own raw uploaded filename (submission.filename) — whatever
+  // they happened to name their file locally, "[Hack]" suffix and all,
+  // with no relation to this entry's actual DAT machine name. Build the
+  // download filename from the canonical machine name instead (same one
+  // shown on this page's own "DAT entry" card below), falling back to the
+  // pre-approval `${hackName} (v${version})` formula resolveMachineName()
+  // itself defaults to, since canDownloadPatch/canPatchInBrowser can both
+  // be true before an ApprovedEntry exists (an owner/admin/verifier
+  // testing the flow on a still-PENDING submission). Extension prefers the
+  // base rom's own recorded fileExtension (the actual byte-order variant
+  // being patched — z64/n64/v64 genuinely differ) over guessing from the
+  // submitter's filename, which is only a fallback for base roms hashed
+  // before that field existed.
+  const patchOutputMachineName =
+    submission.approvedEntry?.machineName ?? `${submission.hackName} (v${submission.version})`;
+  const patchOutputExtension = submission.baseRom?.fileExtension ?? extensionOf(submission.filename);
+  const patchOutputFilename = buildRomDownloadFilename(patchOutputMachineName, patchOutputExtension);
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-12">
       {submission.deletedAt && isAdmin && (
@@ -220,40 +240,54 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               submissionId={submission.id}
               patchType={submission.patchType!}
               baseRom={{ sha1: submission.baseRom!.sha1, name: submission.baseRom!.name }}
-              expectedOutput={{ sha1: submission.sha1, filename: submission.filename }}
+              expectedOutput={{ sha1: submission.sha1, filename: patchOutputFilename }}
             />
           )}
         </div>
       </div>
 
-      {siblingVersions.length > 0 && (
-        <div className="flex items-center gap-2 mb-8 flex-wrap">
-          <span className="text-xs text-text-muted uppercase tracking-wider">Versions:</span>
-          {[
-            { id: submission.id, version: submission.version, createdAt: submission.createdAt, current: true },
-            ...siblingVersions.map((v) => ({ ...v, current: false })),
-          ]
-            .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-            .map((v) =>
-              v.current ? (
-                <span
-                  key={v.id}
-                  className="px-2.5 py-1 rounded-full text-xs font-medium bg-phosphor/15 border border-phosphor/40 text-phosphor"
-                >
-                  v{v.version}
-                </span>
-              ) : (
-                <Link
-                  key={v.id}
-                  href={`/submissions/${v.id}`}
-                  className="px-2.5 py-1 rounded-full text-xs font-medium border border-border text-text-muted hover:border-phosphor/30 hover:text-text-primary transition-colors"
-                >
-                  v{v.version}
-                </Link>
-              )
-            )}
-        </div>
-      )}
+      {/* Versions bar — always shown now (previously only when siblings already
+          existed), since the "Add new version" button belongs here regardless
+          of whether this is the first version of this hack or the fifth. */}
+      <div className="flex items-center gap-2 mb-8 flex-wrap">
+        <span className="text-xs text-text-muted uppercase tracking-wider">Versions:</span>
+        {[
+          { id: submission.id, version: submission.version, createdAt: submission.createdAt, current: true },
+          ...siblingVersions.map((v) => ({ ...v, current: false })),
+        ]
+          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+          .map((v) =>
+            v.current ? (
+              <span
+                key={v.id}
+                className="px-2.5 py-1 rounded-full text-xs font-medium bg-phosphor/15 border border-phosphor/40 text-phosphor"
+              >
+                v{v.version}
+              </span>
+            ) : (
+              <Link
+                key={v.id}
+                href={`/submissions/${v.id}`}
+                className="px-2.5 py-1 rounded-full text-xs font-medium border border-border text-text-muted hover:border-phosphor/30 hover:text-text-primary transition-colors"
+              >
+                v{v.version}
+              </Link>
+            )
+          )}
+        {/* Takes the submitter straight into the normal submit flow, with
+            SubmitForm.tsx pre-filling nearly everything from THIS submission
+            (hack name, author, description, platform, base ROM, tags, links,
+            patch details, etc.) — deliberately excluding version, version
+            changelog, and release date, since those are exactly what's
+            expected to be different about a new version. See
+            GET /api/submissions/[id]/version-prefill. */}
+        <Link
+          href={`/submit?fromSubmission=${submission.id}`}
+          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border border-dashed border-phosphor/40 text-phosphor hover:bg-phosphor/10 transition-colors"
+        >
+          <Plus size={12} /> Add new version
+        </Link>
+      </div>
 
       {submission.versionChangelog && (
         <details className="group mb-6 rounded-lg border border-phosphor/30 bg-phosphor/5">
@@ -478,6 +512,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
 
           <ChangeRequestSection
             submissionId={submission.id}
+            status={submission.status}
             current={{
               hackName: submission.hackName,
               version: submission.version,
@@ -504,6 +539,14 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
             isAdmin={isAdmin}
             canRequest={!!session?.user && !session.user.isBanned}
             hasOtherVersions={siblingVersions.length > 0}
+            fileInfo={{
+              filename: submission.filename,
+              fileSize: formatBytes(Number(submission.fileSize)),
+              crc32: submission.crc32,
+              md5: submission.md5,
+              sha1: submission.sha1,
+            }}
+            verificationScore={submission.verificationScore}
           />
 
           {/* Game database mappings — read-only */}
@@ -562,12 +605,26 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
                 versionChangelog: submission.versionChangelog,
                 sourceUrl: submission.sourceUrl,
                 translationLanguages: submission.translationLanguages,
+                notes: submission.notes,
+                releasePageUrl: submission.releasePageUrl,
+                githubUrl: submission.githubUrl,
+                patchType: submission.patchType,
+                patchFilename: submission.patchFilename,
+                patchSha1: submission.patchSha1,
               }}
               mapping={submission.gameMapping as any}
               tags={submission.tags.map((t: any) => t.tag.slug)}
               currentFamily={submission.hackFamily}
               currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
               hasOtherVersions={siblingVersions.length > 0}
+              fileInfo={{
+                filename: submission.filename,
+                fileSize: formatBytes(Number(submission.fileSize)),
+                crc32: submission.crc32,
+                md5: submission.md5,
+                sha1: submission.sha1,
+              }}
+              verificationScore={submission.verificationScore}
             />
           )}
 

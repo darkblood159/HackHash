@@ -1,5 +1,5 @@
 // src/app/submit/page.tsx
-import React from 'react';
+import React, { Suspense } from 'react';
 import { SubmitForm } from '@/components/SubmitForm';
 
 export const metadata = {
@@ -17,7 +17,13 @@ export default function SubmitPage() {
           Your ROM never leaves this browser tab.
         </p>
       </div>
-      <SubmitForm />
+      {/* useSearchParams() (used below to read ?fromSubmission=) requires a
+          Suspense boundary in the App Router, or `next build` fails static
+          generation for this page — same fix already applied to
+          /auth/signin and /auth/error for the same reason. */}
+      <Suspense fallback={<div className="h-24 rounded-lg bg-bg-elevated border border-border animate-pulse" />}>
+        <SubmitForm />
+      </Suspense>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { Download } from 'lucide-react';
 import { PlatformBadge } from '@/components/ui/PlatformBadge';
 import { TagBadge } from '@/components/ui/TagBadge';
 import { PlatformFilters } from '@/components/PlatformFilters';
+import { PatchFilters } from '@/components/PatchFilters';
 import { EntriesSearchBox } from '@/components/EntriesSearchBox';
 import { PLATFORMS } from '@/types';
 // Note: TagFilters is intentionally NOT on this page. Most entries come from
@@ -25,12 +26,19 @@ function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
 
-export default async function EntriesPage({ searchParams }: { searchParams: { q?: string; page?: string; platform?: string } }) {
+export default async function EntriesPage({ searchParams }: { searchParams: { q?: string; page?: string; platform?: string; hasPatch?: string } }) {
   const q = searchParams.q?.trim();
   const page = Math.max(1, parseInt(searchParams.page ?? '1'));
   const platform = searchParams.platform && (PLATFORMS as readonly string[]).includes(searchParams.platform)
     ? searchParams.platform
     : undefined;
+  // Same validate-against-a-known-set treatment PLATFORMS above gets —
+  // anything other than exactly 'yes'/'no' is treated as "no filter".
+  // Reads Submission.patchUploadedAt (the real "file is attached" flag,
+  // see its own comment in prisma/schema.prisma), not patchType/patchSha1,
+  // which can be set on a submission that only links out to an
+  // externally-hosted patch with nothing actually stored here.
+  const hasPatch = searchParams.hasPatch === 'yes' || searchParams.hasPatch === 'no' ? searchParams.hasPatch : undefined;
   const perPage = 30;
 
   // Explicitly typed rather than left for TypeScript to infer: this array
@@ -84,7 +92,11 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
     : [];
 
   const where: Prisma.ApprovedEntryWhereInput = {
-    submission: { deletedAt: null },
+    submission: {
+      deletedAt: null,
+      ...(hasPatch === 'yes' ? { patchUploadedAt: { not: null } } : {}),
+      ...(hasPatch === 'no' ? { patchUploadedAt: null } : {}),
+    },
     ...(searchConditions.length ? { OR: searchConditions } : {}),
     ...(platform ? { platform: platform as any } : {}),
   };
@@ -116,6 +128,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
           hackFamilyId: true,
           hackFamily: { select: { name: true } },
           tags: { select: { tag: true } },
+          patchUploadedAt: true,
           alternateFormats: { where: { status: 'APPROVED' }, select: { id: true, format: true } },
         },
       },
@@ -167,6 +180,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
     const params = new URLSearchParams();
     if (q) params.set('q', q);
     if (platform) params.set('platform', platform);
+    if (hasPatch) params.set('hasPatch', hasPatch);
     params.set('page', String(p));
     return `/entries?${params.toString()}`;
   };
@@ -190,8 +204,9 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
         </Link>
       </div>
 
-      <div className="mb-6">
+      <div className="mb-6 flex flex-col gap-3">
         <PlatformFilters current={platform} />
+        <PatchFilters current={hasPatch} />
       </div>
 
       <EntriesSearchBox initialQuery={q} platform={platform} />
@@ -233,6 +248,14 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
                           {af.format}
                         </span>
                       ))}
+                    </span>
+                  )}
+                  {entry.submission.patchUploadedAt && (
+                    <span
+                      className="ml-2 align-middle text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-phosphor/10 text-phosphor"
+                      title="A patch file has been uploaded for this version"
+                    >
+                      Patch
                     </span>
                   )}
                 </td>

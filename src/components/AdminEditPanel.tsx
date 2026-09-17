@@ -4,7 +4,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from './ui/Button';
-import { Pencil, AlertTriangle } from 'lucide-react';
+import { Pencil, AlertTriangle, Eye } from 'lucide-react';
 import { PLATFORMS, PLATFORM_LABELS } from '@/types';
 import { MappingsSection, type MappingValues } from './MappingsSection';
 import { MAPPING_FIELD_KEYS } from '@/lib/mappingFields';
@@ -14,6 +14,7 @@ import { TRANSLATION_TRIGGER_SLUGS } from '@/lib/tags';
 import { describeValidationError } from '@/lib/fieldLabels';
 import { FamilyPicker, type SelectedFamily } from './FamilyPicker';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
+import { SubmissionPreviewOverlay, type SubmissionPreviewData, type SubmissionPreviewFields } from './SubmissionPreview';
 
 interface AdminEditPanelProps {
   submissionId: string;
@@ -29,17 +30,36 @@ interface AdminEditPanelProps {
     versionChangelog: string | null;
     sourceUrl: string | null;
     translationLanguages?: string[];
+    // Read-only, for the preview modal only — this panel has no inputs
+    // for any of these three (they're not fields it edits), but a
+    // preview that quietly dropped them would show a page missing real
+    // content it genuinely still has. Passed straight through from the
+    // submission by the caller, never written back.
+    notes?: string | null;
+    releasePageUrl?: string | null;
+    githubUrl?: string | null;
+    // Same reasoning as the three above — this panel doesn't touch the
+    // patch file's own metadata (that's ChangeRequestSection's/the patch
+    // upload flow's territory), but the preview should still show it.
+    patchType?: string | null;
+    patchFilename?: string | null;
+    patchSha1?: string | null;
   };
   mapping?: MappingValues | null;
   tags?: string[]; // current tag slugs
   currentFamily?: SelectedFamily | null;
   currentBaseRom?: SelectedBaseRom | null;
   hasOtherVersions?: boolean; // whether this hack has sibling versions to sync with
+  // Read-only, for the preview only — never edited by this panel, but
+  // real, always-visible content on the actual page (File metadata card,
+  // the score gauge next to the status badge).
+  fileInfo: { filename: string; fileSize: string; crc32: string; md5: string; sha1: string };
+  verificationScore: number;
 }
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
 
-export function AdminEditPanel({ submissionId, status, initial, mapping, tags, currentFamily = null, currentBaseRom = null, hasOtherVersions }: AdminEditPanelProps) {
+export function AdminEditPanel({ submissionId, status, initial, mapping, tags, currentFamily = null, currentBaseRom = null, hasOtherVersions, fileInfo, verificationScore }: AdminEditPanelProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
@@ -65,8 +85,18 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
   const [applyToAllVersions, setApplyToAllVersions] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   const update = (field: keyof typeof form, value: string) => setForm((f) => ({ ...f, [field]: value }));
+
+  // Shared by save() and the preview builder below so the two can never
+  // resolve this differently — whichever of the two inputs is currently
+  // inactive is always '' (see the releaseYearOnly checkbox's onChange),
+  // so this doesn't need to branch on releaseYearOnly itself.
+  const resolveRelease = () => ({
+    releaseYear: form.releaseYear ? parseInt(form.releaseYear, 10) : null,
+    releaseDate: form.releaseDate || null,
+  });
 
   // Order-insensitive — same helper ChangeRequestSection.tsx already has
   // for the identical tags/translationLanguages comparison below.
@@ -121,8 +151,7 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
       // if either half differs from what's on record, send both together
       // so saving correctly clears whichever one is being switched away
       // from (see resolveReleaseFields() in src/lib/hackFamily.ts).
-      const newYear = form.releaseYear ? parseInt(form.releaseYear, 10) : null;
-      const newDate = form.releaseDate || null;
+      const { releaseYear: newYear, releaseDate: newDate } = resolveRelease();
       if (newYear !== initial.releaseYear || newDate !== (initial.releaseDate ?? null)) {
         changes.releaseYear = newYear;
         changes.releaseDate = newDate;
@@ -214,6 +243,55 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
     } finally {
       setSaving(false);
     }
+  };
+
+  const buildPreviewData = (): SubmissionPreviewData => {
+    const { releaseYear, releaseDate } = resolveRelease();
+    // Fields this panel has no inputs for at all (notes/releasePageUrl/
+    // githubUrl/patchType/patchFilename/patchSha1) are identical in
+    // `current` and `proposed` by construction — both read straight from
+    // `initial` — so they correctly never show as "changed" here, only in
+    // ChangeRequestSection's own preview where they're actually editable.
+    const current: SubmissionPreviewFields = {
+      hackName: initial.hackName,
+      version: initial.version,
+      platform: initial.platform,
+      author: initial.author,
+      releaseYear: initial.releaseYear,
+      releaseDate: initial.releaseDate,
+      description: initial.description,
+      versionChangelog: initial.versionChangelog,
+      notes: initial.notes ?? null,
+      releasePageUrl: initial.releasePageUrl ?? null,
+      githubUrl: initial.githubUrl ?? null,
+      sourceUrl: initial.sourceUrl,
+      patchType: initial.patchType ?? null,
+      patchFilename: initial.patchFilename ?? null,
+      patchSha1: initial.patchSha1 ?? null,
+      tags: tags ?? [],
+      translationLanguages: initial.translationLanguages ?? [],
+      mapping: mapping ?? {},
+      baseRom: currentBaseRom,
+      family: currentFamily,
+    };
+    const proposed: SubmissionPreviewFields = {
+      ...current,
+      hackName: form.hackName,
+      version: form.version,
+      platform: form.platform,
+      author: form.author || null,
+      releaseYear,
+      releaseDate,
+      description: form.description || null,
+      versionChangelog: form.versionChangelog || null,
+      sourceUrl: form.sourceUrl || null,
+      tags: tagsForm,
+      translationLanguages: translationLanguagesForm,
+      mapping: mappingForm,
+      baseRom: selectedBaseRom,
+      family: selectedFamily,
+    };
+    return { status, verificationScore, fileInfo, current, proposed };
   };
 
   if (!open) {
@@ -352,8 +430,13 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
 
       <div className="flex gap-2">
         <Button size="sm" loading={saving} onClick={save}>Save changes</Button>
+        <Button size="sm" variant="outline" onClick={() => setPreviewOpen(true)}>
+          <Eye size={13} /> Preview
+        </Button>
         <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
       </div>
+
+      <SubmissionPreviewOverlay open={previewOpen} onClose={() => setPreviewOpen(false)} data={buildPreviewData()} />
     </div>
   );
 }

@@ -1,8 +1,8 @@
 'use client';
 
 // src/components/SubmitForm.tsx
-import React, { useState, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import React, { useState, useRef, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { ROMProcessor } from './ROMProcessor';
 import { MappingsSection, type MappingValues } from './MappingsSection';
@@ -83,6 +83,12 @@ const inputClass = "w-full px-3 py-2 rounded-md bg-bg-surface border border-bord
 export function SubmitForm() {
   const { data: session, status, update: updateSession } = useSession();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // Set when arriving here via a specific submission's own "Add new
+  // version" button (src/app/submissions/[id]/page.tsx) rather than a bare
+  // /submit visit — see the version-prefill effect below.
+  const fromSubmissionId = searchParams.get('fromSubmission');
+  const isAddingNewVersion = !!fromSubmissionId;
 
   const [romInfo, setRomInfo] = useState<ROMFileInfo | null>(null);
   const [form, setForm] = useState<FormState>(initialForm);
@@ -117,6 +123,15 @@ export function SubmitForm() {
   const [releaseYearOnly, setReleaseYearOnly] = useState(false);
   const nameSuggestionRef = useRef<HTMLDivElement>(null);
   const baseRomRef = useRef<HTMLDivElement>(null);
+  // Set true for the duration of the "add new version" flow (see the
+  // version-prefill effect below) so applyFamilyPrefill — triggered
+  // separately whenever the hack name turns out to match an existing
+  // family, which it always will here — never fills releaseDate/
+  // releaseYear back in behind the scenes. A ref rather than state so it's
+  // read correctly from inside applyFamilyPrefill's closure regardless of
+  // exactly when/how many times that function gets called relative to a
+  // render.
+  const skipDatePrefillRef = useRef(false);
   // Fields populated by a family match (autocomplete pick, an exact
   // filename-parse match, or the blur/submit-time near-match resolving) —
   // tracked purely so those specific fields can get a brief visual marker,
@@ -154,7 +169,7 @@ export function SubmitForm() {
         const next = { ...f };
         if (!f.platform && data.platform) { next.platform = data.platform; filled.add('platform'); }
         if (!f.author && data.author) { next.author = data.author; filled.add('author'); }
-        if (!f.releaseDate && !f.releaseYear) {
+        if (!skipDatePrefillRef.current && !f.releaseDate && !f.releaseYear) {
           // Prefer the family's full date when it has one; fall back to
           // year-only. Either way this also sets the toggle so the right
           // input actually shows what just got filled in — silently
@@ -238,6 +253,93 @@ export function SubmitForm() {
     checkSimilarName(s.name, s.platform);
   };
 
+  // "Add new version" flow — arriving here via ?fromSubmission=<id> (set by
+  // the button on that submission's own detail page, next to the version
+  // switcher) rather than a bare /submit visit. Fetches that ONE
+  // submission's own details — not just the family-wide subset
+  // applyFamilyPrefill above pulls — and fills nearly everything in ahead
+  // of time: hack name, author, description, platform, source/release/
+  // GitHub URLs, notes, patch details, tags, translation languages, game
+  // database links, and the base ROM. Deliberately excludes version,
+  // versionChangelog, and releaseDate/releaseYear — see
+  // GET /api/submissions/[id]/version-prefill's own comment for why.
+  // Runs once on mount; fromSubmissionId can't change without a fresh page
+  // load (it comes from a static link), so there's nothing to re-run for.
+  useEffect(() => {
+    if (!fromSubmissionId) return;
+    skipDatePrefillRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/submissions/${fromSubmissionId}/version-prefill`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled) return;
+
+        const filled = new Set<string>();
+        setForm((f) => {
+          const next = { ...f };
+          // Excludes the two array-typed fields (tags/translationLanguages,
+          // handled separately below) — keeping this narrower than
+          // `keyof FormState` is what lets the cast just below stay
+          // type-safe instead of silently allowing a string into an
+          // array-typed field.
+          type StringFieldKey = Exclude<keyof FormState, 'tags' | 'translationLanguages'>;
+          const maybeFill = (key: StringFieldKey, value: unknown) => {
+            if (typeof value === 'string' && value && !next[key]) {
+              (next as Record<StringFieldKey, string>)[key] = value;
+              filled.add(key);
+            }
+          };
+          maybeFill('hackName', data.hackName);
+          maybeFill('platform', data.platform);
+          maybeFill('author', data.author);
+          maybeFill('description', data.description);
+          maybeFill('sourceUrl', data.sourceUrl);
+          maybeFill('notes', data.notes);
+          maybeFill('releasePageUrl', data.releasePageUrl);
+          maybeFill('githubUrl', data.githubUrl);
+          maybeFill('patchType', data.patchType);
+          maybeFill('patchFilename', data.patchFilename);
+          maybeFill('patchSha1', data.patchSha1);
+          if (!next.tags.length && data.tags?.length) { next.tags = data.tags; filled.add('tags'); }
+          if (!next.translationLanguages.length && data.translationLanguages?.length) {
+            next.translationLanguages = data.translationLanguages;
+            filled.add('translationLanguages');
+          }
+          if (data.gameDatabaseLinks) {
+            for (const [key, val] of Object.entries(data.gameDatabaseLinks)) {
+              if (val && !next[key as keyof FormState]) {
+                (next as Record<string, unknown>)[key] = val;
+                filled.add(key);
+              }
+            }
+          }
+          return next;
+        });
+        if (filled.size > 0) setAutoFilledFields((prev) => new Set([...Array.from(prev), ...Array.from(filled)]));
+        if (data.baseRom) setBaseRom(data.baseRom);
+
+        // Surfaces the "this will be added as a new version of X" banner
+        // (with this flow's own wording, see isAddingNewVersion below)
+        // right away instead of waiting for the user to blur the hack name
+        // field or reach submit — the name/platform are already known with
+        // certainty here, no need to wait for user interaction to check.
+        if (data.hackName && data.platform) {
+          checkSimilarName(data.hackName, data.platform);
+        }
+      } catch {
+        // Non-fatal — same convenience-not-gate philosophy as the rest of
+        // this form; worst case the submitter fills everything in by hand,
+        // same as landing on a bare /submit.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromSubmissionId]);
+
   const handleFileProcessed = async (info: ROMFileInfo) => {
     setRomInfo(info);
     setEarlyDuplicate(null);
@@ -260,9 +362,17 @@ export function SubmitForm() {
     // isn't known yet at this point, so this searches across all of them —
     // only auto-applied if there's exactly one match, to avoid guessing
     // between two same-named hacks on different platforms).
+    //
+    // Skipped entirely while adding a new version (isAddingNewVersion) —
+    // the hack is already unambiguous in that case (see the version-prefill
+    // effect above, which already set hackName from the known source
+    // submission), and letting a filename-based guess win a single
+    // autocomplete match here would call handleSuggestionSelect below,
+    // which unconditionally overwrites hackName — clobbering the prefilled
+    // value with a close-but-not-necessarily-identical name.
     const [dupResult, matchResult] = await Promise.allSettled([
       fetch(`/api/submissions/check-duplicate?sha1=${info.sha1}`).then((r) => r.json()),
-      parsedName.hackName
+      !isAddingNewVersion && parsedName.hackName
         ? fetch(`/api/entries/autocomplete?q=${encodeURIComponent(parsedName.hackName)}`).then((r) => r.json())
         : Promise.resolve(null),
     ]);
@@ -783,15 +893,30 @@ export function SubmitForm() {
               version family. Shared fields + game database links were
               already prefilled above via applyFamilyPrefill; fields that
               got auto-filled carry a small marker (Sparkles icon) so it's
-              clear which ones to double-check, not just re-typed blind. */}
+              clear which ones to double-check, not just re-typed blind.
+              Wording branches for the "add new version" flow specifically,
+              since that flow deliberately does NOT prefill a release date
+              (skipDatePrefillRef above) — the generic copy below would
+              otherwise claim it did. */}
           {nameCheck?.exactMatch && (
             <div className="p-3 rounded-lg bg-phosphor/5 border border-phosphor/20">
               <p className="text-sm text-text-primary flex items-start gap-1.5">
                 <Sparkles size={14} className="text-phosphor shrink-0 mt-0.5" />
                 <span>
-                  This will be added as a new version of <strong>{nameCheck.exactMatch.name}</strong>. Author, release date,
-                  description, tags, and any game database links were pre-filled from the existing entry — take a second to
-                  check they're still right for this version, and change anything that isn't.
+                  {isAddingNewVersion ? (
+                    <>
+                      This will be added as a new version of <strong>{nameCheck.exactMatch.name}</strong>. Everything below
+                      was pre-filled from that entry except the version number, changelog, and release date — those are
+                      exactly the things expected to change this time, so fill those in and adjust anything else that's
+                      different for this version.
+                    </>
+                  ) : (
+                    <>
+                      This will be added as a new version of <strong>{nameCheck.exactMatch.name}</strong>. Author, release
+                      date, description, tags, and any game database links were pre-filled from the existing entry — take a
+                      second to check they're still right for this version, and change anything that isn't.
+                    </>
+                  )}
                 </span>
               </p>
               <label className="flex items-center gap-1.5 text-xs text-text-muted mt-2 cursor-pointer">

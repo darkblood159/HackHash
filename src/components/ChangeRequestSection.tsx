@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import { Button } from './ui/Button';
 import { Avatar } from './ui/Avatar';
 import { formatDistanceToNow } from 'date-fns';
-import { Pencil, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { Pencil, CheckCircle2, XCircle, Clock, Eye } from 'lucide-react';
 import { PLATFORMS, PLATFORM_LABELS } from '@/types';
 import { MappingsSection, type MappingValues } from './MappingsSection';
 import { MAPPING_FIELD_KEYS } from '@/lib/mappingFields';
@@ -17,6 +17,7 @@ import { LanguagePicker } from './LanguagePicker';
 import { TRANSLATION_TRIGGER_SLUGS } from '@/lib/tags';
 import { languageName } from '@/lib/languages';
 import { FIELD_LABELS, describeValidationError } from '@/lib/fieldLabels';
+import { SubmissionPreviewOverlay, type SubmissionPreviewData, type SubmissionPreviewFields } from './SubmissionPreview';
 
 interface ChangeRequest {
   id: string;
@@ -36,6 +37,9 @@ interface ChangeRequest {
 
 interface ChangeRequestSectionProps {
   submissionId: string;
+  // Not itself proposable through this form — passed through only so the
+  // preview modal's status badge reflects reality instead of guessing.
+  status: string;
   current: {
     hackName: string;
     version: string;
@@ -62,12 +66,17 @@ interface ChangeRequestSectionProps {
   isAdmin: boolean;
   canRequest: boolean;
   hasOtherVersions?: boolean; // whether this hack has sibling versions to sync with
+  // Read-only, for the preview only — not proposable through this form,
+  // but real, always-visible content on the actual page (File metadata
+  // card, the score gauge next to the status badge).
+  fileInfo: { filename: string; fileSize: string; crc32: string; md5: string; sha1: string };
+  verificationScore: number;
 }
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
 const PATCH_TYPES = ['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS'] as const;
 
-export function ChangeRequestSection({ submissionId, current, currentMapping, currentFamily = null, currentBaseRom = null, currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions }: ChangeRequestSectionProps) {
+export function ChangeRequestSection({ submissionId, status, current, currentMapping, currentFamily = null, currentBaseRom = null, currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions, fileInfo, verificationScore }: ChangeRequestSectionProps) {
   const router = useRouter();
   const [requests, setRequests] = useState(initialRequests);
   const [open, setOpen] = useState(false);
@@ -101,6 +110,7 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   const update = (field: keyof typeof form, value: string) => setForm((f) => ({ ...f, [field]: value }));
 
@@ -205,6 +215,57 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
     } finally {
       setReviewing(null);
     }
+  };
+
+  const buildPreviewData = (): SubmissionPreviewData => {
+    const releaseYear = form.releaseYear ? parseInt(form.releaseYear, 10) : null;
+    const releaseDate = form.releaseDate || null;
+    const currentFields: SubmissionPreviewFields = {
+      hackName: current.hackName,
+      version: current.version,
+      platform: current.platform,
+      author: current.author,
+      releaseYear: current.releaseYear,
+      releaseDate: current.releaseDate,
+      description: current.description,
+      versionChangelog: current.versionChangelog,
+      notes: current.notes,
+      releasePageUrl: current.releasePageUrl,
+      githubUrl: current.githubUrl,
+      sourceUrl: current.sourceUrl,
+      patchType: current.patchType,
+      patchFilename: current.patchFilename,
+      patchSha1: current.patchSha1,
+      tags: currentTags,
+      translationLanguages: currentTranslationLanguages,
+      mapping: currentMapping ?? {},
+      baseRom: currentBaseRom,
+      family: currentFamily,
+    };
+    const proposed: SubmissionPreviewFields = {
+      ...currentFields,
+      hackName: form.hackName,
+      version: form.version,
+      platform: form.platform,
+      author: form.author || null,
+      releaseYear,
+      releaseDate,
+      description: form.description || null,
+      versionChangelog: form.versionChangelog || null,
+      notes: form.notes || null,
+      releasePageUrl: form.releasePageUrl || null,
+      githubUrl: form.githubUrl || null,
+      sourceUrl: form.sourceUrl || null,
+      patchType: form.patchType || null,
+      patchFilename: form.patchFilename || null,
+      patchSha1: form.patchSha1 || null,
+      tags: tagsForm,
+      translationLanguages: translationLanguagesForm,
+      mapping: mappingForm,
+      baseRom: selectedBaseRom,
+      family: selectedFamily,
+    };
+    return { status, verificationScore, fileInfo, current: currentFields, proposed };
   };
 
   return (
@@ -383,8 +444,13 @@ export function ChangeRequestSection({ submissionId, current, currentMapping, cu
           {error && <p className="text-xs text-status-rejected whitespace-pre-line">{error}</p>}
           <div className="flex gap-2">
             <Button size="sm" loading={submitting} onClick={submitRequest}>Submit request</Button>
+            <Button size="sm" variant="outline" onClick={() => setPreviewOpen(true)}>
+              <Eye size={13} /> Preview
+            </Button>
             <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
           </div>
+
+          <SubmissionPreviewOverlay open={previewOpen} onClose={() => setPreviewOpen(false)} data={buildPreviewData()} />
         </div>
       )}
 
