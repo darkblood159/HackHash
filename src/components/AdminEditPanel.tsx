@@ -14,6 +14,7 @@ import { TRANSLATION_TRIGGER_SLUGS } from '@/lib/tags';
 import { describeValidationError } from '@/lib/fieldLabels';
 import { FamilyPicker, type SelectedFamily } from './FamilyPicker';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
+import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
 import { SubmissionPreviewOverlay, type SubmissionPreviewData, type SubmissionPreviewFields } from './SubmissionPreview';
 
 interface AdminEditPanelProps {
@@ -49,6 +50,7 @@ interface AdminEditPanelProps {
   tags?: string[]; // current tag slugs
   currentFamily?: SelectedFamily | null;
   currentBaseRom?: SelectedBaseRom | null;
+  currentFranchise?: SelectedFranchise | null;
   hasOtherVersions?: boolean; // whether this hack has sibling versions to sync with
   // Read-only, for the preview only — never edited by this panel, but
   // real, always-visible content on the actual page (File metadata card,
@@ -59,7 +61,7 @@ interface AdminEditPanelProps {
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
 
-export function AdminEditPanel({ submissionId, status, initial, mapping, tags, currentFamily = null, currentBaseRom = null, hasOtherVersions, fileInfo, verificationScore }: AdminEditPanelProps) {
+export function AdminEditPanel({ submissionId, status, initial, mapping, tags, currentFamily = null, currentBaseRom = null, currentFranchise = null, hasOtherVersions, fileInfo, verificationScore }: AdminEditPanelProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
@@ -82,6 +84,7 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
   const [translationLanguagesForm, setTranslationLanguagesForm] = useState<string[]>(initial.translationLanguages ?? []);
   const [selectedFamily, setSelectedFamily] = useState<SelectedFamily | null>(currentFamily);
   const [selectedBaseRom, setSelectedBaseRom] = useState<SelectedBaseRom | null>(currentBaseRom);
+  const [selectedFranchise, setSelectedFranchise] = useState<SelectedFranchise | null>(currentFranchise);
   const [applyToAllVersions, setApplyToAllVersions] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -180,10 +183,16 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
       // null, any real pick differs from that, so it's sent.
       const baseRomChanged = !!selectedBaseRom && selectedBaseRom.id !== (currentBaseRom?.id ?? null);
       const familyChanged = (selectedFamily?.id ?? null) !== (currentFamily?.id ?? null);
+      // Unlike baseRomChanged above, a plain diff is right here — franchise
+      // is optional, so null is a real value, and FranchisePicker's "Change"
+      // keeps the old value until a new one is actually picked (only its
+      // explicit "Remove" produces null), so an abandoned Change can't
+      // masquerade as a removal.
+      const franchiseChanged = (selectedFranchise?.id ?? null) !== (currentFranchise?.id ?? null);
 
       const hasMainPayload =
         Object.keys(changes).length > 0 || Object.keys(mappingPayload).length > 0 ||
-        tagsChanged || translationLanguagesChanged || baseRomChanged;
+        tagsChanged || translationLanguagesChanged || baseRomChanged || franchiseChanged;
 
       if (!hasMainPayload && !familyChanged) {
         // Nothing actually changed — closing the panel without a wasted
@@ -203,6 +212,7 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
             ...(translationLanguagesChanged ? { translationLanguages: translationLanguagesForm } : {}),
             applyToAllVersions,
             ...(baseRomChanged ? { baseRomId: selectedBaseRom!.id } : {}),
+            ...(franchiseChanged ? { franchiseId: selectedFranchise?.id ?? null } : {}),
             ...mappingPayload,
           }),
         });
@@ -396,6 +406,11 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
         </div>
 
         <div>
+          <label className="block text-xs text-text-muted mb-1">Franchise</label>
+          <FranchisePicker value={selectedFranchise} onChange={setSelectedFranchise} />
+        </div>
+
+        <div>
           <label className="block text-xs text-text-muted mb-1">Family</label>
           <FamilyPicker
             platform={form.platform}
@@ -422,7 +437,7 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
             onChange={(e) => setApplyToAllVersions(e.target.checked)}
             className="accent-phosphor"
           />
-          Apply hack name/author/release date/description/tag changes to all versions of this hack
+          Apply hack name/author/release date/description/tag/franchise changes to all versions of this hack
         </label>
       )}
 

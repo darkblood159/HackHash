@@ -38,7 +38,7 @@ export const NULLABLE_FIELD_LIMITS = {
   notes: z.string().max(5000).nullable(),
   releasePageUrl: z.string().url().or(z.literal('')).nullable(),
   githubUrl: z.string().url().or(z.literal('')).nullable(),
-  patchType: z.enum(['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS']).nullable(),
+  patchType: z.enum(['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS', 'OTHER']).nullable(),
   patchFilename: z.string().max(500).nullable(),
   patchSha1: z.string().regex(/^[0-9a-f]{40}$/i).nullable(),
 } as const;

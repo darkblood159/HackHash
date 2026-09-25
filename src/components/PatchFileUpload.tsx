@@ -26,17 +26,137 @@
 // exact same check independently and is the actual authority; a manually
 // crafted request with canManage bypassed client-side still gets a real
 // 403 from the route.
+//
+// ARCHIVE SUPPORT (.zip/.gz/.7z/.rar): reuses src/lib/archiveExtract.ts
+// completely as-is — the same module ROMProcessor.tsx already uses to let
+// a submitter drop a compressed ROM archive instead of extracting it
+// first. Extraction happens entirely client-side; what actually gets
+// uploaded is the one chosen file's real extracted bytes, wrapped in a
+// synthetic File with its own in-archive name — from that point on it
+// flows through the exact same stageFile()/upload() path as a directly-
+// dropped patch file always has, so nothing server-side needed to change
+// at all: the upload route already validates a patch by sniffing the
+// actual bytes it receives (detectPatchFormat, patchValidation.ts), never
+// by trusting a filename or extension. The only new client-side decision
+// is WHICH file inside the archive is the patch — auto-picked when
+// unambiguous (pickAutoPatchCandidate, archiveExtract.ts), or left to the
+// person via the PatchArchivePicker component further below when it isn't.
 import React, { useCallback, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { clsx } from 'clsx';
-import { Upload, FileCheck, AlertCircle, Loader2, ShieldAlert, Trash2, UploadCloud } from 'lucide-react';
-import { patchTypeFromFilename, sha1Hex, HashingUnavailableError } from '@/lib/patchTypes';
+import { Upload, FileCheck, AlertCircle, Loader2, ShieldAlert, Trash2, UploadCloud, ListChecks } from 'lucide-react';
+import { patchTypeFromFilename, patchTypeLabel, sha1Hex, HashingUnavailableError } from '@/lib/patchTypes';
 import { PATCH_UPLOADS_DISABLED_MESSAGE } from '@/lib/patchUploadState';
+import {
+  classifyArchive, readZipCandidates, read7zCandidates, readGzipFile, pickAutoPatchCandidate,
+  type ArchiveCandidate,
+} from '@/lib/archiveExtract';
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+}
 
 interface Staged {
   file: File;
   sha1: string;
   guessedType: string | null;
+  // Set when this file was extracted from an archive rather than dropped
+  // directly — shown in the staged card ("extracted from X.zip") same as
+  // ROMProcessor.tsx's FileCard already does for the ROM side, so it's
+  // never ambiguous which file is about to actually be uploaded.
+  sourceArchiveName?: string;
+}
+
+// Shown instead of the normal drop zone when an archive has more than one
+// plausible file inside it and pickAutoPatchCandidate (archiveExtract.ts)
+// couldn't confidently pick one on its own — same shape of problem
+// ROMProcessor.tsx's own ArchivePickerCard solves for ROMs, adapted to
+// this component's smaller/compact card style rather than duplicated
+// wholesale (that one also renders progress/hash cards for a whole LIST
+// of files; this component only ever stages one).
+interface PendingPatchArchive {
+  archiveFile: File;
+  candidates: ArchiveCandidate[];
+  extract: (path: string, onProgress?: (percent: number | null) => void) => Promise<Uint8Array>;
+}
+
+const MAX_PATCH_ARCHIVE_CANDIDATES_SHOWN = 50;
+
+function PatchArchivePicker({
+  pending,
+  onChoose,
+  onCancel,
+}: {
+  pending: PendingPatchArchive;
+  onChoose: (candidate: ArchiveCandidate) => void;
+  onCancel: () => void;
+}) {
+  const [selectedPath, setSelectedPath] = useState(pending.candidates[0]?.path ?? '');
+  const shown = pending.candidates.slice(0, MAX_PATCH_ARCHIVE_CANDIDATES_SHOWN);
+  const hiddenCount = pending.candidates.length - shown.length;
+
+  return (
+    <div className="space-y-2 rounded-lg border border-border bg-bg-elevated p-3">
+      <div className="flex items-center gap-2 text-xs text-text-secondary">
+        <ListChecks size={12} className="shrink-0 text-phosphor" />
+        <span className="font-mono text-text-primary truncate flex-1">{pending.archiveFile.name}</span>
+        <span className="text-text-muted font-mono shrink-0">{pending.candidates.length} files</span>
+      </div>
+      <p className="text-xs text-text-secondary">
+        This archive has more than one file — pick the one that&apos;s the actual patch.
+      </p>
+      <div className="space-y-1 max-h-48 overflow-y-auto">
+        {shown.map((c) => (
+          <button
+            key={c.path}
+            type="button"
+            onClick={() => setSelectedPath(c.path)}
+            className={clsx(
+              'w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left transition-colors',
+              selectedPath === c.path
+                ? 'bg-phosphor/10 border border-phosphor/40'
+                : 'border border-transparent hover:bg-bg-surface'
+            )}
+          >
+            <span className="truncate flex-1 font-mono text-xs text-text-primary">{c.path}</span>
+            {patchTypeFromFilename(c.basename) && (
+              <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-phosphor/15 text-phosphor">
+                looks like {patchTypeFromFilename(c.basename)}
+              </span>
+            )}
+            <span className="shrink-0 text-[10px] text-text-muted font-mono">
+              {c.size != null ? formatBytes(c.size) : '—'}
+            </span>
+          </button>
+        ))}
+      </div>
+      {hiddenCount > 0 && (
+        <p className="text-[10px] text-text-muted">+{hiddenCount} more file{hiddenCount === 1 ? '' : 's'} not shown.</p>
+      )}
+      <div className="flex gap-2">
+        <button
+          onClick={onCancel}
+          className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-bg-surface"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={() => {
+            const candidate = pending.candidates.find((c) => c.path === selectedPath);
+            if (candidate) onChoose(candidate);
+          }}
+          disabled={!selectedPath}
+          className="rounded-md bg-phosphor px-3 py-1.5 text-xs font-medium text-bg-base hover:bg-phosphor/90 disabled:opacity-50"
+        >
+          Use this file
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // Mirrors the `patchTypeMismatch` object the upload route now sends
@@ -78,15 +198,24 @@ export function PatchFileUpload({
   // never linger and describe an attempt that's no longer current.
   const [mismatch, setMismatch] = useState<PatchTypeMismatch | null>(null);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  // Archive-handling state — mirrors ROMProcessor.tsx's own phase/progress
+  // tracking, scoped down to this component's simpler "stage exactly one
+  // file" job (no list of files, no per-entry keys needed). `archivePhase`
+  // is purely descriptive text/UI state; `busy` (above) remains the one
+  // real gate on the dropzone/buttons throughout, same as before this
+  // feature existed.
+  const [archivePhase, setArchivePhase] = useState<'reading' | 'extracting' | null>(null);
+  const [archiveProgress, setArchiveProgress] = useState<number | null>(null);
+  const [pendingArchive, setPendingArchive] = useState<PendingPatchArchive | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const stageFile = useCallback(async (file: File) => {
+  const stageFile = useCallback(async (file: File, sourceArchiveName?: string) => {
     setError(null);
     setMismatch(null);
     setBusy(true);
     try {
       const sha1 = await sha1Hex(file);
-      setStaged({ file, sha1, guessedType: patchTypeFromFilename(file.name) });
+      setStaged({ file, sha1, guessedType: patchTypeFromFilename(file.name), sourceArchiveName });
     } catch (err) {
       // Logged, not just swallowed — a generic on-screen message is fine
       // for the person, but silently discarding the real error made this
@@ -102,15 +231,139 @@ export function PatchFileUpload({
     }
   }, []);
 
+  // Handles a raw dropped/selected file, extracting it first if it's a
+  // supported archive (.zip/.gz/.7z/.rar) — see the file-header comment
+  // for why this needs no server-side changes at all. A non-archive file
+  // (or one this project's list doesn't try to auto-extract) falls
+  // straight through to stageFile exactly as before this feature existed.
+  const processFile = useCallback(
+    async (file: File) => {
+      setError(null);
+      setMismatch(null);
+      setPendingArchive(null);
+
+      const format = classifyArchive(file.name);
+
+      if (format.kind === 'unsupported') {
+        setError(
+          `${format.label} archives can't be auto-extracted yet — extract the patch file yourself, then drop it in directly.`
+        );
+        return;
+      }
+
+      if (format.kind === 'none') {
+        await stageFile(file);
+        return;
+      }
+
+      setBusy(true);
+      setArchivePhase(format.kind === 'sevenzip' ? 'reading' : 'extracting');
+      // 7z-wasm's own load+list step has no percent-complete signal at
+      // all (see archiveExtract.ts's "7-ZIP / RAR" section) — null renders
+      // as an indeterminate pulse below rather than a fabricated number,
+      // same convention ROMProcessor.tsx already uses for the same reason.
+      setArchiveProgress(format.kind === 'sevenzip' ? null : 0);
+
+      try {
+        if (format.kind === 'gzip') {
+          const result = await readGzipFile(file);
+          if (!result.ok) {
+            setError(result.error);
+            return;
+          }
+          const innerFile = new File([new Uint8Array(result.bytes)], result.innerName, {
+            lastModified: file.lastModified,
+          });
+          await stageFile(innerFile, file.name);
+          return;
+        }
+
+        const result =
+          format.kind === 'zip' ? await readZipCandidates(file) : await read7zCandidates(file, format.label);
+        if (!result.ok) {
+          setError(result.error);
+          return;
+        }
+
+        setArchivePhase('extracting');
+        setArchiveProgress(format.kind === 'sevenzip' ? null : 0);
+
+        // Auto-pick only when unambiguous (pickAutoPatchCandidate's own
+        // comment has the exact tiers) — anything less certain shows
+        // PatchArchivePicker instead of guessing, since guessing wrong
+        // here means silently uploading the wrong file as this
+        // submission's patch.
+        const chosen = pickAutoPatchCandidate(result.candidates);
+        if (!chosen) {
+          setPendingArchive({
+            archiveFile: file,
+            candidates: [...result.candidates].sort(
+              (a, b) =>
+                Number(patchTypeFromFilename(b.basename) !== null) -
+                  Number(patchTypeFromFilename(a.basename) !== null) || (b.size ?? 0) - (a.size ?? 0)
+            ),
+            extract: result.extract,
+          });
+          return;
+        }
+
+        const bytes = await result.extract(chosen.path, (percent) => setArchiveProgress(percent));
+        // Forces a concrete ArrayBuffer-backed copy rather than passing
+        // the library's own return value straight through — same reason
+        // ROMProcessor.tsx's own extraction call sites do this (see that
+        // file's comment): File's BlobPart type requires it, and real
+        // browsers throw at runtime on a SharedArrayBuffer-backed view.
+        const innerFile = new File([new Uint8Array(bytes)], chosen.basename, { lastModified: file.lastModified });
+        await stageFile(innerFile, file.name);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Couldn't extract this file — please try again.");
+      } finally {
+        setArchivePhase(null);
+        setArchiveProgress(null);
+        setBusy(false);
+      }
+    },
+    [stageFile]
+  );
+
+  // Called when the person picks a file from PatchArchivePicker after an
+  // ambiguous archive. Same extract-then-stage shape as the auto-pick
+  // path in processFile above, just triggered by a click instead of
+  // running automatically.
+  const chooseArchiveCandidate = useCallback(
+    async (candidate: ArchiveCandidate) => {
+      if (!pendingArchive) return;
+      const { archiveFile, extract } = pendingArchive;
+      setPendingArchive(null);
+      setBusy(true);
+      setArchivePhase('extracting');
+      setArchiveProgress(0);
+      try {
+        const bytes = await extract(candidate.path, (percent) => setArchiveProgress(percent));
+        const innerFile = new File([new Uint8Array(bytes)], candidate.basename, {
+          lastModified: archiveFile.lastModified,
+        });
+        await stageFile(innerFile, archiveFile.name);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Couldn't extract this file — please try again.");
+      } finally {
+        setArchivePhase(null);
+        setArchiveProgress(null);
+        setBusy(false);
+      }
+    },
+    [pendingArchive, stageFile]
+  );
+
   // Exactly one patch file per submission — same "take the unambiguous
   // first one" handling as PatchDropzone, applied to a situation where
   // there's genuinely nowhere for a second one to go.
   const handleFiles = useCallback(
     (list: FileList | null) => {
       if (!list || list.length === 0) return;
-      stageFile(list[0]);
+      processFile(list[0]);
     },
-    [stageFile]
+    [processFile]
   );
 
   const upload = useCallback(async () => {
@@ -236,6 +489,20 @@ export function PatchFileUpload({
           <UploadCloud size={16} className="shrink-0" />
           <span>{PATCH_UPLOADS_DISABLED_MESSAGE}</span>
         </div>
+      ) : pendingArchive ? (
+        <PatchArchivePicker
+          pending={pendingArchive}
+          onChoose={chooseArchiveCandidate}
+          onCancel={() => setPendingArchive(null)}
+        />
+      ) : archivePhase ? (
+        <div className="flex items-center gap-2 rounded-lg border-2 border-dashed border-border bg-bg-elevated px-4 py-4 text-center text-sm text-text-secondary">
+          <Loader2 size={16} className="shrink-0 animate-spin text-phosphor" />
+          <span>
+            {archivePhase === 'reading' ? 'Reading archive…' : 'Extracting…'}
+            {archiveProgress !== null && ` ${Math.round(archiveProgress)}%`}
+          </span>
+        </div>
       ) : !staged ? (
         <div
           onDrop={(e) => {
@@ -250,24 +517,27 @@ export function PatchFileUpload({
           onDragLeave={() => setDragging(false)}
           onClick={() => inputRef.current?.click()}
           className={clsx(
-            'relative flex cursor-pointer select-none items-center justify-center gap-3 rounded-lg border-2 border-dashed px-4 py-4 text-center transition-all',
+            'relative flex cursor-pointer select-none flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed px-4 py-4 text-center transition-all',
             dragging ? 'border-phosphor bg-phosphor/5' : 'border-border hover:border-phosphor/50 hover:bg-bg-elevated'
           )}
         >
-          {busy ? (
-            <Loader2 size={16} className="shrink-0 animate-spin text-phosphor" />
-          ) : (
-            <Upload size={16} className={clsx('shrink-0', dragging ? 'text-phosphor' : 'text-text-muted')} />
-          )}
-          <p className="text-sm font-medium text-text-primary">
-            {hasFile
-              ? dragging
-                ? 'Drop to stage the replacement'
-                : 'Drop a replacement patch file, or click to browse'
-              : dragging
-                ? 'Drop to stage the patch'
-                : 'Drop the patch file here, or click to browse'}
-          </p>
+          <div className="flex items-center gap-3">
+            {busy ? (
+              <Loader2 size={16} className="shrink-0 animate-spin text-phosphor" />
+            ) : (
+              <Upload size={16} className={clsx('shrink-0', dragging ? 'text-phosphor' : 'text-text-muted')} />
+            )}
+            <p className="text-sm font-medium text-text-primary">
+              {hasFile
+                ? dragging
+                  ? 'Drop to stage the replacement'
+                  : 'Drop a replacement patch file, or click to browse'
+                : dragging
+                  ? 'Drop to stage the patch'
+                  : 'Drop the patch file here, or click to browse'}
+            </p>
+          </div>
+          <p className="text-xs text-text-muted">.zip, .rar, and .7z are unpacked automatically</p>
           <input ref={inputRef} type="file" className="hidden" onChange={(e) => handleFiles(e.target.files)} />
         </div>
       ) : (
@@ -277,6 +547,9 @@ export function PatchFileUpload({
             <span className="font-mono text-text-primary">{staged.file.name}</span>
             {staged.guessedType && <span>— looks like {staged.guessedType}</span>}
           </div>
+          {staged.sourceArchiveName && (
+            <p className="text-[10px] text-text-muted pl-[18px]">extracted from {staged.sourceArchiveName}</p>
+          )}
           <div className="flex gap-2">
             <button
               onClick={upload}
@@ -298,6 +571,8 @@ export function PatchFileUpload({
 
       {hasFile &&
         !staged &&
+        !pendingArchive &&
+        !archivePhase &&
         (confirmingRemove ? (
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="text-text-secondary">Remove this patch file?</span>
@@ -334,7 +609,7 @@ export function PatchFileUpload({
               disabled={busy}
               className="rounded-md border border-status-rejected/40 px-2.5 py-1 text-xs font-medium text-status-rejected hover:bg-status-rejected/10 disabled:opacity-50"
             >
-              {busy ? 'Updating…' : `Use ${mismatch.detectedType} instead of ${mismatch.declaredType} & upload`}
+              {busy ? 'Updating…' : `Use ${patchTypeLabel(mismatch.detectedType)} instead of ${patchTypeLabel(mismatch.declaredType)} & upload`}
             </button>
           )}
         </div>

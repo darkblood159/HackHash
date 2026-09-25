@@ -12,11 +12,13 @@ import { MappingsSection, type MappingValues } from './MappingsSection';
 import { MAPPING_FIELD_KEYS } from '@/lib/mappingFields';
 import { FamilyPicker, type SelectedFamily } from './FamilyPicker';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
+import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
 import { TagsEditor } from './TagsEditor';
 import { LanguagePicker } from './LanguagePicker';
 import { TRANSLATION_TRIGGER_SLUGS } from '@/lib/tags';
 import { languageName } from '@/lib/languages';
 import { FIELD_LABELS, describeValidationError } from '@/lib/fieldLabels';
+import { PATCH_TYPES, patchTypeLabel } from '@/lib/patchTypes';
 import { SubmissionPreviewOverlay, type SubmissionPreviewData, type SubmissionPreviewFields } from './SubmissionPreview';
 
 interface ChangeRequest {
@@ -30,6 +32,7 @@ interface ChangeRequest {
   proposedTranslationLanguages?: string[] | null;
   proposedFamily?: { id: string | null; name: string | null } | null;
   proposedBaseRom?: { id: string; name: string } | null;
+  proposedFranchise?: { id: string | null; name: string | null } | null;
   createdAt: string | Date;
   requestedBy: { id: string; name: string | null; image: string | null };
   reviewedBy?: { id: string; name: string | null } | null;
@@ -60,6 +63,7 @@ interface ChangeRequestSectionProps {
   currentMapping?: MappingValues | null;
   currentFamily?: SelectedFamily | null;
   currentBaseRom?: SelectedBaseRom | null;
+  currentFranchise?: SelectedFranchise | null;
   currentTags?: string[]; // current tag slugs
   currentTranslationLanguages?: string[];
   initialRequests: ChangeRequest[];
@@ -74,9 +78,8 @@ interface ChangeRequestSectionProps {
 }
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
-const PATCH_TYPES = ['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS'] as const;
 
-export function ChangeRequestSection({ submissionId, status, current, currentMapping, currentFamily = null, currentBaseRom = null, currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions, fileInfo, verificationScore }: ChangeRequestSectionProps) {
+export function ChangeRequestSection({ submissionId, status, current, currentMapping, currentFamily = null, currentBaseRom = null, currentFranchise = null, currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions, fileInfo, verificationScore }: ChangeRequestSectionProps) {
   const router = useRouter();
   const [requests, setRequests] = useState(initialRequests);
   const [open, setOpen] = useState(false);
@@ -103,6 +106,7 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
   const [mappingForm, setMappingForm] = useState<MappingValues>(currentMapping ?? {});
   const [selectedFamily, setSelectedFamily] = useState<SelectedFamily | null>(currentFamily);
   const [selectedBaseRom, setSelectedBaseRom] = useState<SelectedBaseRom | null>(currentBaseRom);
+  const [selectedFranchise, setSelectedFranchise] = useState<SelectedFranchise | null>(currentFranchise);
   const [tagsForm, setTagsForm] = useState<string[]>(currentTags);
   const [translationLanguagesForm, setTranslationLanguagesForm] = useState<string[]>(currentTranslationLanguages);
   const [applyToAllVersions, setApplyToAllVersions] = useState(true);
@@ -161,11 +165,15 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
     // family can (see proposedBaseRom's schema comment) — only a real,
     // completed, actually-different pick counts.
     const baseRomChanged = !!selectedBaseRom && selectedBaseRom.id !== (currentBaseRom?.id ?? null);
+    // Plain diff — franchise is optional so null ("remove it") is a real
+    // proposal, and FranchisePicker only produces null via its explicit
+    // "Remove" (see the identical check in AdminEditPanel.tsx).
+    const franchiseChanged = (selectedFranchise?.id ?? null) !== (currentFranchise?.id ?? null);
     const tagsChanged = !sameSet(tagsForm, currentTags);
     const translationLanguagesChanged = !sameSet(translationLanguagesForm, currentTranslationLanguages);
 
-    if (Object.keys(changes).length === 0 && !familyChanged && !baseRomChanged && !tagsChanged && !translationLanguagesChanged) {
-      setError('No changes proposed — edit at least one field, change the tags, pick a different family, or pick a different base ROM.');
+    if (Object.keys(changes).length === 0 && !familyChanged && !baseRomChanged && !franchiseChanged && !tagsChanged && !translationLanguagesChanged) {
+      setError('No changes proposed — edit at least one field, change the tags, pick a different family, pick a different base ROM, or change the franchise.');
       return;
     }
 
@@ -181,6 +189,7 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
           applyToAllVersions,
           ...(familyChanged ? { proposedFamily: { id: selectedFamily?.id ?? null, name: selectedFamily?.name ?? null } } : {}),
           ...(baseRomChanged ? { proposedBaseRom: { id: selectedBaseRom!.id, name: selectedBaseRom!.name } } : {}),
+          ...(franchiseChanged ? { proposedFranchise: { id: selectedFranchise?.id ?? null, name: selectedFranchise?.name ?? null } } : {}),
           ...(tagsChanged ? { proposedTags: tagsForm } : {}),
           ...(translationLanguagesChanged ? { proposedTranslationLanguages: translationLanguagesForm } : {}),
         }),
@@ -367,7 +376,7 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
                 <label className="block text-xs text-text-muted mb-1">Patch type</label>
                 <select className={inputClass} value={form.patchType} onChange={(e) => update('patchType', e.target.value)}>
                   <option value="">None</option>
-                  {PATCH_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                  {PATCH_TYPES.map((t) => <option key={t} value={t}>{patchTypeLabel(t)}</option>)}
                 </select>
               </div>
               <div>
@@ -409,6 +418,11 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
           <div>
             <label className="block text-xs text-text-muted mb-1">Base ROM</label>
             <BaseRomPicker platform={form.platform} value={selectedBaseRom} onChange={setSelectedBaseRom} />
+          </div>
+
+          <div>
+            <label className="block text-xs text-text-muted mb-1">Franchise</label>
+            <FranchisePicker value={selectedFranchise} onChange={setSelectedFranchise} />
           </div>
 
           <div>
@@ -499,6 +513,12 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
                     <span className="text-text-muted">Base ROM:</span> {r.proposedBaseRom.name}
                   </p>
                 )}
+                {r.proposedFranchise !== undefined && r.proposedFranchise !== null && (
+                  <p className="text-xs text-text-secondary">
+                    <span className="text-text-muted">Franchise:</span>{' '}
+                    {r.proposedFranchise.id ? r.proposedFranchise.name : <em className="text-text-muted">remove franchise</em>}
+                  </p>
+                )}
               </div>
               {r.reason && <p className="text-xs text-text-muted mt-1.5 italic">"{r.reason}"</p>}
               {hasOtherVersions && r.applyToAllVersions !== false && r.status === 'PENDING' && (
@@ -509,6 +529,14 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
               )}
               {r.proposedBaseRom !== undefined && r.proposedBaseRom !== null && r.status === 'PENDING' && (
                 <p className="text-xs text-phosphor mt-1">Approving this will also switch its base ROM to {r.proposedBaseRom.name}.</p>
+              )}
+              {r.proposedFranchise !== undefined && r.proposedFranchise !== null && r.status === 'PENDING' && (
+                <p className="text-xs text-phosphor mt-1">
+                  {r.proposedFranchise.id
+                    ? `Approving this will also set its franchise to ${r.proposedFranchise.name}`
+                    : 'Approving this will also remove its franchise'}
+                  {hasOtherVersions && r.applyToAllVersions !== false ? ', on every version of this hack.' : '.'}
+                </p>
               )}
 
               {isAdmin && r.status === 'PENDING' && (

@@ -190,6 +190,39 @@ you've already changed.
 
 ---
 
+## Large uploads: patch files and DAT imports
+
+Two different things in this app can hit a size limit on a big upload — a
+patch file attached to a submission, and a DAT file imported through the
+admin panel. Both can fail for either (or both) of two separate reasons,
+so if one of these errors out on a large file, check both:
+
+**1. The app's own limit.** Patch uploads default to a 2GB ceiling
+(`PATCH_MAX_UPLOAD_BYTES`, in bytes — e.g. `3221225472` for 3GB). To raise
+it, add it as an environment variable to the `app` service in your
+Portainer stack (same place `NEXTAUTH_SECRET` etc. already live), then
+Recreate the container. DAT imports don't have an equivalent size cap —
+they're capped by how many entries fit in one request instead, and
+ImportDatForm.tsx already sends large imports in batches for that reason.
+
+**2. `client_max_body_size`, if you're behind Nginx Proxy Manager (or
+similar).** This is a *separate* limit, enforced by the proxy in front of
+the app, and it defaults to a fairly small value (often 1MB) — meaning it
+can reject a large upload before that request ever reaches the app at
+all, regardless of what `PATCH_MAX_UPLOAD_BYTES` is set to. If a patch
+upload fails immediately with a generic error (rather than the app's own
+"File is larger than the Xmb limit" message), this is almost always why.
+In Nginx Proxy Manager: edit the relevant Proxy Host → **Advanced** tab →
+add
+```
+client_max_body_size 2048M;
+```
+(adjust the number to comfortably exceed whatever `PATCH_MAX_UPLOAD_BYTES`
+is set to) → **Save**. A different reverse proxy will have its own
+equivalent setting under a different name.
+
+---
+
 ## Updating the app later
 
 Since Portainer is using a locally-built image (not one it built itself),

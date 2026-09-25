@@ -5,7 +5,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { ShieldCheck, Users, Inbox, UploadCloud, Pencil, Globe, Layers, Disc3, Package, Settings } from 'lucide-react';
+import { ShieldCheck, Users, Inbox, UploadCloud, Pencil, Globe, Layers, Disc3, Package, Settings, DatabaseBackup, Library } from 'lucide-react';
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await getServerSession(authOptions);
@@ -25,6 +25,12 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   const pendingFormatsCount = await prisma.alternateFormat.count({
     where: { status: 'PENDING', submission: { deletedAt: null } },
   });
+
+  // Pending franchise proposals — same "no other discovery surface" reasoning
+  // as the alternate-formats badge above. `.catch(() => 0)` because this is
+  // only a nav badge: if the franchises migration hasn't been applied yet it
+  // should quietly show nothing, not take down every admin page.
+  const pendingFranchisesCount = await prisma.franchise.count({ where: { status: 'PENDING' } }).catch(() => 0);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12">
@@ -49,6 +55,12 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         <Link href="/admin/base-roms" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
           <Disc3 size={14} /> Base ROMs
         </Link>
+        <Link href="/admin/franchises" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
+          <Library size={14} /> Franchises
+          {pendingFranchisesCount > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full bg-phosphor/20 text-phosphor text-[10px] font-bold">{pendingFranchisesCount}</span>
+          )}
+        </Link>
         <Link href="/admin/alternate-formats" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
           <Package size={14} /> Alternate formats
           {pendingFormatsCount > 0 && (
@@ -63,6 +75,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         </Link>
         <Link href="/admin/settings" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
           <Settings size={14} /> Settings
+        </Link>
+        <Link href="/admin/backup" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
+          <DatabaseBackup size={14} /> Backup
         </Link>
       </div>
 

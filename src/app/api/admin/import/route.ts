@@ -10,6 +10,9 @@ import { LANGUAGE_CODES } from '@/lib/languages';
 import { stripMappingValues } from '@/lib/mappingFields';
 import { resolveOrCreateFamily, resolveReleaseFields } from '@/lib/hackFamily';
 import { resolveOrCreateBaseRom } from '@/lib/baseRom';
+import { resolveOrCreateFranchise, FranchiseNameError } from '@/lib/franchise';
+import { statPatchFile, buildPatchDisplaySlug } from '@/lib/patchStorage';
+import type { PatchTypeValue } from '@/lib/patchTypes';
 
 const MAX_ENTRIES = 5000;
 
@@ -51,9 +54,16 @@ const entrySchema = z.object({
   realDescription: z.string().max(5000).optional(),
   tags: z.array(z.string()).max(20).optional(), // cap raised alongside the tags overhaul — see submissions/route.ts's matching comment
   translationLanguages: z.array(z.string()).max(10).optional(),
-  patchType: z.enum(['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS']).optional(),
+  patchType: z.enum(['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS', 'OTHER']).optional(),
   patchFilename: z.string().max(500).optional(),
   patchSha1: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+  // The slug the original upload stored the physical file under (see
+  // src/lib/patchStorage.ts) — present only for a detailed-export
+  // re-import made after this field was added. Used below to check
+  // whether the actual patch FILE survived (patch storage is a bind-
+  // mounted host directory, independent of the database), not just its
+  // declared metadata, and reattach it immediately if so.
+  patchStoredSlug: z.string().max(120).optional(),
   baseRom: z.object({
     name: z.string().min(1).max(300),
     platform: z.string(), // validated against PLATFORMS at use time; falls back to the entry's own platform if it doesn't match
@@ -62,6 +72,14 @@ const entrySchema = z.object({
     md5: z.string().regex(/^[0-9a-f]{32}$/i),
     sha1: z.string().regex(/^[0-9a-f]{40}$/i),
     status: z.enum(['PENDING', 'APPROVED', 'REJECTED']).optional(),
+  }).optional(),
+  // The hack's franchise, present only for a detailed-export re-import.
+  // status is a plain string (not an enum) on purpose: an unrecognized value
+  // in an uploaded file should degrade to a sensible default at use time,
+  // not fail validation for the entire import.
+  franchise: z.object({
+    name: z.string().min(1).max(300),
+    status: z.string().optional(),
   }).optional(),
   // Other compressed/container copies of this exact file, present only for
   // a detailed-export re-import — see the matching comment on
@@ -150,6 +168,11 @@ export async function POST(req: NextRequest) {
 
   let imported = 0;
   let skippedDuplicates = 0;
+  // How many imported entries had a physical patch file rediscovered on
+  // disk and reattached live (see patchReattachment below) — surfaced in
+  // the response so ImportDatForm.tsx can actually confirm this happened,
+  // rather than an admin only finding out by opening an entry afterward.
+  let patchesReattached = 0;
   const errors: Array<{ machineName: string; error: string }> = [];
   // AUG-28: duplicates used to record only {machineName, sha1, reason} — the
   // exact same three fields regardless of what was actually already there,
@@ -224,6 +247,31 @@ export async function POST(req: NextRequest) {
             return;
           }
 
+          // If this entry declares a patch (only ever present for a
+          // detailed-export re-import — a plain DAT/lean-JSON source has
+          // no patch data at all), check whether the actual FILE survived
+          // on disk, not just its declared type/filename/hash. Patch
+          // storage is a bind-mounted host directory, independent of the
+          // database (see src/lib/patchStorage.ts) — a database rebuild
+          // alone doesn't lose it. The export carries the exact slug the
+          // ORIGINAL upload stored the file under (patchStoredSlug); fall
+          // back to recomputing one from this entry's own hackName/version
+          // for an export made before that field existed, or a hand-
+          // edited file missing it — best-effort, same spirit as every
+          // other backward-compatible fallback in this importer. Checked
+          // here, outside the transaction below, since it's a filesystem
+          // call with nothing to roll back. Without this, a re-imported
+          // entry would show no patch button at all until someone
+          // manually re-uploaded a file that was never actually lost.
+          let patchReattachment: { storedSlug: string; fileSize: number } | null = null;
+          if (entry.patchSha1 && entry.patchType) {
+            const candidateSlug = entry.patchStoredSlug || buildPatchDisplaySlug(entry.hackName, entry.version);
+            const found = await statPatchFile(entry.patchSha1.toLowerCase(), entry.patchType as PatchTypeValue, candidateSlug);
+            if (found) {
+              patchReattachment = { storedSlug: candidateSlug, fileSize: found.size };
+            }
+          }
+
           await prisma.$transaction(async (tx) => {
             // Per-entry notes (from a detailed-export re-import) are
             // combined with, not overwritten by, the batch attribution —
@@ -261,6 +309,19 @@ export async function POST(req: NextRequest) {
                 patchType: entry.patchType || null,
                 patchFilename: entry.patchFilename || null,
                 patchSha1: entry.patchSha1?.toLowerCase() || null,
+                // Only set when the physical file was actually found on
+                // disk (patchReattachment, computed above) — otherwise
+                // this stays in the normal "declared but not uploaded"
+                // state the schema already supports, same as any other
+                // hash-only patch declaration.
+                ...(patchReattachment
+                  ? {
+                      patchStoredSlug: patchReattachment.storedSlug,
+                      patchFileSize: patchReattachment.fileSize,
+                      patchUploadedAt: new Date(),
+                      patchUploadedById: session.user.id,
+                    }
+                  : {}),
               },
             });
 
@@ -341,6 +402,33 @@ export async function POST(req: NextRequest) {
                 true // tx here is an open prisma.$transaction — see resolveOrCreateBaseRom's inTransaction param
               );
               await tx.submission.update({ where: { id: submission.id }, data: { baseRomId } });
+            }
+
+            // Franchise — same detailed-export-only treatment as baseRom just
+            // above, same preserve-the-source-status reasoning. Resolves by
+            // normalized name, so importing many hacks of one franchise
+            // produces ONE Franchise row, and re-importing over an existing
+            // database reuses what's already there. A name that can't be a
+            // franchise at all (no letters/numbers, from a hand-edited
+            // file) is skipped rather than failing the whole entry.
+            if (entry.franchise) {
+              const franchiseStatus = entry.franchise.status === 'PENDING' ? 'PENDING' : 'APPROVED';
+              try {
+                const { franchiseId } = await resolveOrCreateFranchise(
+                  tx,
+                  {
+                    name: entry.franchise.name,
+                    submittedById: session.user.id,
+                    status: franchiseStatus,
+                    approvedById: franchiseStatus === 'APPROVED' ? session.user.id : null,
+                    approvedAt: franchiseStatus === 'APPROVED' ? new Date() : null,
+                  },
+                  true // tx here is an open prisma.$transaction — see resolveOrCreateFranchise's inTransaction param
+                );
+                await tx.submission.update({ where: { id: submission.id }, data: { franchiseId } });
+              } catch (err) {
+                if (!(err instanceof FranchiseNameError)) throw err;
+              }
             }
 
             // Alternate formats — only present for a detailed-export
@@ -425,6 +513,7 @@ export async function POST(req: NextRequest) {
           });
 
           imported++;
+          if (patchReattachment) patchesReattached++;
         } catch (err: any) {
           const reason = err?.code === 'P2002' ? 'An entry with this name already exists in the DAT' : 'Unexpected error creating entry';
           errors.push({ machineName: entry.machineName, error: reason });
@@ -448,5 +537,5 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  return NextResponse.json({ importId, imported, skippedDuplicates, errors, skippedEntries });
+  return NextResponse.json({ importId, imported, skippedDuplicates, errors, skippedEntries, patchesReattached });
 }

@@ -1,18 +1,21 @@
 // src/lib/patchTypes.ts
 //
-// Single source of truth for the six patch formats this project recognizes
-// — mirrors the Prisma PatchType enum (prisma/schema.prisma) exactly.
+// Single source of truth for the patch formats this project recognizes —
+// mirrors the Prisma PatchType enum (prisma/schema.prisma) exactly. Six
+// are real, byte-detectable formats (see patchValidation.ts's
+// detectPatchFormat); the seventh, OTHER, is a deliberate catch-all for a
+// real patch tool this project doesn't have a byte signature for (added
+// after a real request — Kingdom Hearts-modding patches were the concrete
+// example — for uncommon formats generally, not that one specifically).
 // Previously a hand-copied local `const PATCH_TYPES = [...]` in BOTH
 // SubmitForm.tsx and ChangeRequestSection.tsx (ChangeRequestSection's own
 // comment at the time: "no existing shared home for it"). Centralizing now
-// because patchTypeFromFilename() below needs the same six values anyway —
-// this file becomes that shared home. SubmitForm.tsx has been switched to
-// import PATCH_TYPES from here as part of this change.
-// ChangeRequestSection.tsx's own copy is UNTOUCHED for now — it's not part
-// of the drag-and-drop feature this file exists for, and there's a second
-// Claude session working in this codebase concurrently, so this round
-// deliberately keeps its edits scoped to only the files the actual feature
-// needs. Worth pointing ChangeRequestSection.tsx at this same file later.
+// because patchTypeFromFilename() below needs the same values anyway —
+// this file becomes that shared home. SubmitForm.tsx and
+// ChangeRequestSection.tsx both import PATCH_TYPES from here now (the
+// latter's own copy was left un-consolidated for one round while a second
+// Claude session was concurrently working in this codebase — see git
+// history — and finished here once that was no longer a concern).
 //
 // Deliberately does NOT import anything from src/lib/romExtensions.ts, even
 // though that file's KNOWN_NON_ROM_EXTENSIONS already happens to list these
@@ -24,8 +27,23 @@
 // two lists already agree; worth reconciling into one only once both
 // sessions' changes have actually landed.
 
-export const PATCH_TYPES = ['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS'] as const;
+export const PATCH_TYPES = ['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS', 'OTHER'] as const;
 export type PatchTypeValue = (typeof PATCH_TYPES)[number];
+
+// Every dropdown that lists PATCH_TYPES renders each value as its own
+// label — fine for the five real acronyms (IPS/BPS/UPS/PPF/APS read
+// naturally in caps) and XDELTA, but 'OTHER' in full caps reads like an
+// error state rather than a normal option. This is the one place that
+// distinction is made, so every dropdown shows the same thing.
+// Widened to plain `string` rather than PatchTypeValue on purpose — some
+// callers (PatchFileUpload.tsx's PatchTypeMismatch, an echo of a value
+// that's already been validated server-side) deliberately don't carry the
+// narrower type themselves, and this function's only real job is "is this
+// literally the string 'OTHER'," which needs nothing more specific than
+// that to be correct.
+export function patchTypeLabel(type: string): string {
+  return type === 'OTHER' ? 'Other' : type;
+}
 
 // xdelta patches occasionally carry '.vcdiff' instead of '.xdelta' — VCDIFF
 // is the underlying format's actual RFC name, and some tools default to it.

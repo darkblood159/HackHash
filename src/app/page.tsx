@@ -12,10 +12,18 @@ import { formatDistanceToNow } from 'date-fns';
 export const dynamic = 'force-dynamic';
 
 async function getStats() {
-  const [approvedCount, submissionCount, userCount, recentApproved, recentSubmissions] = await Promise.all([
+  const [approvedCount, submissionCount, userCount, patchCount, recentApproved, recentSubmissions] = await Promise.all([
     prisma.approvedEntry.count({ where: { submission: { deletedAt: null } } }),
     prisma.submission.count({ where: { deletedAt: null } }),
     prisma.user.count({ where: { role: { not: 'GUEST' } } }),
+    // Same scope as approvedCount above (live, public, non-deleted entries)
+    // — patchUploadedAt is the real "is a file actually attached" signal,
+    // not patchSha1/patchType, which can be populated with no file ever
+    // uploaded (a hash-only declared patch). See the field's own comment
+    // in prisma/schema.prisma.
+    prisma.submission.count({
+      where: { deletedAt: null, patchUploadedAt: { not: null }, approvedEntry: { isNot: null } },
+    }),
     prisma.approvedEntry.findMany({
       where: { submission: { deletedAt: null } },
       take: 6,
@@ -30,7 +38,7 @@ async function getStats() {
     }),
   ]);
 
-  return { approvedCount, submissionCount, userCount, recentApproved, recentSubmissions };
+  return { approvedCount, submissionCount, userCount, patchCount, recentApproved, recentSubmissions };
 }
 
 export default async function HomePage() {
@@ -38,6 +46,7 @@ export default async function HomePage() {
     approvedCount: 0,
     submissionCount: 0,
     userCount: 0,
+    patchCount: 0,
     recentApproved: [],
     recentSubmissions: [],
   }));

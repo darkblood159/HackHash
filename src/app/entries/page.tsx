@@ -9,6 +9,8 @@ import { TagBadge } from '@/components/ui/TagBadge';
 import { PlatformFilters } from '@/components/PlatformFilters';
 import { PatchFilters } from '@/components/PatchFilters';
 import { EntriesSearchBox } from '@/components/EntriesSearchBox';
+import { FranchiseFilter } from '@/components/FranchiseFilter';
+import { getFranchiseFilterOptions } from '@/lib/franchise';
 import { PLATFORMS } from '@/types';
 // Note: TagFilters is intentionally NOT on this page. Most entries come from
 // DAT imports which don't assign tags to submissions — filtering the entries
@@ -26,7 +28,7 @@ function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
 
-export default async function EntriesPage({ searchParams }: { searchParams: { q?: string; page?: string; platform?: string; hasPatch?: string } }) {
+export default async function EntriesPage({ searchParams }: { searchParams: { q?: string; page?: string; platform?: string; hasPatch?: string; franchise?: string; author?: string } }) {
   const q = searchParams.q?.trim();
   const page = Math.max(1, parseInt(searchParams.page ?? '1'));
   const platform = searchParams.platform && (PLATFORMS as readonly string[]).includes(searchParams.platform)
@@ -39,6 +41,20 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
   // which can be set on a submission that only links out to an
   // externally-hosted patch with nothing actually stored here.
   const hasPatch = searchParams.hasPatch === 'yes' || searchParams.hasPatch === 'no' ? searchParams.hasPatch : undefined;
+  // Franchise filter — resolved by id against the real table, same
+  // stale-id-falls-back-to-no-filter treatment /submissions gives baseRomId
+  // (a franchise that was merged or removed since a link was shared just
+  // stops filtering instead of returning a mysteriously empty page).
+  const franchiseFilter = searchParams.franchise
+    ? await prisma.franchise.findUnique({ where: { id: searchParams.franchise }, select: { id: true, name: true } })
+    : null;
+  const franchiseOptions = await getFranchiseFilterOptions(prisma, 'entries', franchiseFilter);
+  // Author filter — an EXACT (case-insensitive) match on the author name,
+  // not a "contains": this param is reached by clicking an author's name,
+  // where the intent is "this person's hacks", and a substring match would
+  // sweep in unrelated names that merely contain it. Typing a partial name
+  // to look someone up is what /search's Author mode is for.
+  const author = searchParams.author?.trim() || undefined;
   const perPage = 30;
 
   // Explicitly typed rather than left for TypeScript to infer: this array
@@ -96,6 +112,8 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
       deletedAt: null,
       ...(hasPatch === 'yes' ? { patchUploadedAt: { not: null } } : {}),
       ...(hasPatch === 'no' ? { patchUploadedAt: null } : {}),
+      ...(franchiseFilter ? { franchiseId: franchiseFilter.id } : {}),
+      ...(author ? { author: { equals: author, mode: 'insensitive' as const } } : {}),
     },
     ...(searchConditions.length ? { OR: searchConditions } : {}),
     ...(platform ? { platform: platform as any } : {}),
@@ -181,9 +199,20 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
     if (q) params.set('q', q);
     if (platform) params.set('platform', platform);
     if (hasPatch) params.set('hasPatch', hasPatch);
+    if (franchiseFilter) params.set('franchise', franchiseFilter.id);
+    if (author) params.set('author', author);
     params.set('page', String(p));
     return `/entries?${params.toString()}`;
   };
+
+  // Same idea as /submissions' clearBaseRomHref: drop only the author
+  // filter, keep every other active one.
+  const clearAuthorParams = new URLSearchParams();
+  if (q) clearAuthorParams.set('q', q);
+  if (platform) clearAuthorParams.set('platform', platform);
+  if (hasPatch) clearAuthorParams.set('hasPatch', hasPatch);
+  if (franchiseFilter) clearAuthorParams.set('franchise', franchiseFilter.id);
+  const clearAuthorHref = `/entries${clearAuthorParams.toString() ? `?${clearAuthorParams.toString()}` : ''}`;
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-12">
@@ -207,6 +236,17 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
       <div className="mb-6 flex flex-col gap-3">
         <PlatformFilters current={platform} />
         <PatchFilters current={hasPatch} />
+        <FranchiseFilter options={franchiseOptions} current={franchiseFilter?.id} />
+        {author && (
+          <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-phosphor/30 bg-phosphor/5 text-xs">
+            <span className="text-text-secondary">
+              Showing hacks by <span className="text-phosphor font-medium">{author}</span>
+            </span>
+            <Link href={clearAuthorHref} className="ml-auto text-text-muted hover:text-phosphor underline shrink-0">
+              Clear
+            </Link>
+          </div>
+        )}
       </div>
 
       <EntriesSearchBox initialQuery={q} platform={platform} />
@@ -260,7 +300,11 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
                   )}
                 </td>
                 <td className="px-4 py-3"><PlatformBadge platform={entry.platform} size="sm" /></td>
-                <td className="px-4 py-3 text-text-muted hidden sm:table-cell">{entry.submission.author ?? '—'}</td>
+                <td className="px-4 py-3 text-text-muted hidden sm:table-cell">{entry.submission.author ? (
+                    <Link href={`/entries?author=${encodeURIComponent(entry.submission.author)}`} className="hover:text-phosphor hover:underline">
+                      {entry.submission.author}
+                    </Link>
+                  ) : '—'}</td>
                 <td className="px-4 py-3 hidden lg:table-cell">
                   <div className="flex gap-1 flex-wrap">
                     {entry.submission.tags.slice(0, 3).map(({ tag: t }) => (

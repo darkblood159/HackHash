@@ -175,6 +175,20 @@ model Submission {
   // field was added. See src/lib/baseRom.ts.
   baseRomId         String?
   baseRom           BaseRom?         @relation(fields: [baseRomId], references: [id])
+  // Which game franchise/series this hack belongs to (Super Mario, Zelda,
+  // Pokémon...). OPTIONAL, unlike baseRomId above — plenty of hacks
+  // (original homebrew, one-off games) have no franchise, so null is a
+  // perfectly valid, permanent state here, not a legacy gap. Points at a
+  // shared, deduplicated Franchise row (see the Franchise model) rather
+  // than free text, so "Super Mario" and "super  mario" can never become
+  // two different filter entries. Treated as family-shared the same way
+  // tags are (propagateFranchise in src/lib/franchise.ts), NOT via
+  // SHARED_FIELD_KEYS — that list is scalar columns that also live on
+  // HackFamily itself, and this doesn't. onDelete: SetNull is also
+  // Prisma's default for an optional relation; spelled out because
+  // removing a franchise is meant to silently unlink its hacks, not block.
+  franchiseId       String?
+  franchise         Franchise?       @relation(fields: [franchiseId], references: [id], onDelete: SetNull)
   notes             String?          @db.Text
   releasePageUrl    String?
   githubUrl         String?
@@ -225,6 +239,7 @@ model Submission {
   @@index([deletedAt])
   @@index([hackFamilyId])
   @@index([baseRomId])
+  @@index([franchiseId])
 }
 
 enum SubmissionStatus {
@@ -243,6 +258,7 @@ enum PatchType {
   XDELTA
   PPF
   APS
+  OTHER
 }
 
 enum Platform {
@@ -418,6 +434,49 @@ model BaseRom {
   submissions     Submission[]
 
   @@index([platform])
+  @@index([status])
+}
+
+// ─── Franchises ────────────────────────────────────────────────────────────────
+// A shared, deduplicated game franchise/series (Super Mario, The Legend of
+// Zelda, Pokémon...) that hacks can be grouped and filtered under. Mirrors
+// the BaseRom pattern on purpose: submitters pick an existing one from a
+// list, or propose a new one when theirs isn't there yet — and a proposed
+// one starts PENDING until an admin approves it (the hack submission itself
+// isn't blocked on that). The goal is exactly the point of doing it this
+// way instead of a free-text field: nobody ends up with three near-identical
+// entries for the same franchise.
+//
+// `nameKey` (normalizeNameKey() from src/lib/hackFamily.ts, the same
+// normalizer HackFamily uses) is the identity/dedupe key — globally unique,
+// NOT platform-scoped the way BaseRom/HackFamily are, since a franchise
+// legitimately spans platforms. Case, punctuation, and repeated whitespace
+// all collapse away in it, so "Super Mario", "super  mario", and
+// "Super-Mario" resolve to one row. See resolveOrCreateFranchise in
+// src/lib/franchise.ts.
+//
+// submittedById/approvedById are plain scalar columns with NO @relation —
+// same shape as Submission.deletedById and DismissedFamilyPair.dismissedById
+// already use — deliberately, so this feature doesn't need to touch the
+// User model at all (fewer merge conflicts, and nothing here ever needs to
+// join through to a user).
+enum FranchiseStatus {
+  PENDING
+  APPROVED
+}
+
+model Franchise {
+  id            String          @id @default(cuid())
+  name          String
+  nameKey       String          @unique
+  status        FranchiseStatus @default(PENDING)
+  submittedById String?
+  approvedById  String?
+  approvedAt    DateTime?
+  createdAt     DateTime        @default(now())
+
+  submissions   Submission[]
+
   @@index([status])
 }
 
@@ -776,6 +835,14 @@ model ChangeRequest {
   // via validateBaseRomAssignment() in src/lib/baseRom.ts. null/absent =
   // no base-rom change proposed.
   proposedBaseRom Json?
+  // Proposed franchise change. Unlike proposedBaseRom, a null id IS a valid
+  // case here ("remove the franchise") since franchise is optional on a
+  // Submission — same shape as proposedFamily: { id: string | null, name:
+  // string | null }, name being a display-only snapshot and the actual
+  // change re-validated against the live Franchise row by id at approval
+  // time (reassignSubmissionFranchise in src/lib/franchise.ts). null/absent
+  // = no franchise change proposed.
+  proposedFranchise Json?
   reason        String?             @db.Text
   status        ChangeRequestStatus @default(PENDING)
   reviewedById  String?

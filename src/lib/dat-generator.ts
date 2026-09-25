@@ -93,6 +93,15 @@ interface DetailedEntry {
       type: string | null;
       filename: string | null;
       sha1: string | null;
+      // The exact slug baked into the stored file's name on disk
+      // ({sha1}__{storedSlug}.{ext} — see src/lib/patchStorage.ts),
+      // persisted at upload time rather than the CURRENT hackName/version
+      // (which a later rename could have changed). Included specifically
+      // so a re-import of this export can find the physical file again
+      // without guessing — see admin/import/route.ts's reattachment logic.
+      // null whenever no file has actually been uploaded (patchUploadedAt
+      // unset), same as the three fields above.
+      storedSlug: string | null;
     };
     // Reference to the UNPATCHED source ROM this hack's patch expects —
     // separate from the top-level crc32/md5/sha1 on the entry itself, which
@@ -109,6 +118,12 @@ interface DetailedEntry {
       sha1: string;
       status: string;
     } | null;
+    // The game franchise/series this hack belongs to (see the Franchise
+    // model in prisma/schema.prisma), or null. Includes status for the same
+    // reason baseRom does above: a re-import should preserve an already-
+    // approved franchise instead of resetting it to pending — see
+    // resolveOrCreateFranchise in src/lib/franchise.ts.
+    franchise: { name: string; status: string } | null;
 
     // Other compressed/container copies of this exact file that a trusted
     // reviewer has confirmed (see the AlternateFormat model's own comment
@@ -250,6 +265,7 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
           tags: { include: { tag: true } },
           hackFamily: true,
           baseRom: true,
+          franchise: true,
           alternateFormats: { where: { status: 'APPROVED' }, orderBy: { createdAt: 'asc' } },
         },
       },
@@ -305,6 +321,11 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
           type: sub?.patchType ?? null,
           filename: sub?.patchFilename ?? null,
           sha1: sub?.patchSha1 ?? null,
+          // Only ever non-null when a file is actually attached
+          // (patchUploadedAt set) — patchStoredSlug is cleared back to
+          // null by DELETE /api/submissions/[id]/patch whenever the file
+          // itself is removed, so this needs no separate check here.
+          storedSlug: sub?.patchStoredSlug ?? null,
         },
         baseRom: sub?.baseRom
           ? {
@@ -316,6 +337,9 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
               sha1: sub.baseRom.sha1,
               status: sub.baseRom.status,
             }
+          : null,
+        franchise: sub?.franchise
+          ? { name: sub.franchise.name, status: sub.franchise.status }
           : null,
 
         alternateFormats: sub?.alternateFormats.map((af) => ({

@@ -59,6 +59,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       tags: { select: { tag: { select: { slug: true } } } },
       gameMapping: true,
       baseRom: { select: { id: true, name: true, status: true, fileExtension: true } },
+      franchise: { select: { id: true, name: true, status: true } },
     },
   });
 
@@ -111,6 +112,11 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
           status: submission.baseRom.status,
           fileExtension: submission.baseRom.fileExtension,
         }
+      : null,
+    // Carried over so a new version of a hack starts out in the same
+    // franchise — the form still lets the submitter change or remove it.
+    franchise: submission.franchise
+      ? { id: submission.franchise.id, name: submission.franchise.name, status: submission.franchise.status }
       : null,
   });
 }

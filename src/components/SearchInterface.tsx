@@ -30,8 +30,10 @@ interface SearchResults {
 // hack's own name/hash, same behavior this always had. 'baserom' checks a
 // BaseRom's name/hash instead and returns whichever hacks reference
 // whatever matched — same result shape either way, see /api/search's own
-// searchByBaseRom for why that made the API side simpler too.
-type SearchTarget = 'hack' | 'baserom';
+// searchByBaseRom for why that made the API side simpler too. 'author'
+// matches the AUTHOR NAME only, across approved and unapproved hacks alike
+// (see searchByAuthor in the same file for why the default mode can't).
+type SearchTarget = 'hack' | 'baserom' | 'author';
 
 export function SearchInterface() {
   const [query, setQuery] = useState('');
@@ -39,24 +41,39 @@ export function SearchInterface() {
   const [results, setResults] = useState<SearchResults | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const search = useCallback(async (q: string, target: SearchTarget) => {
+  // `signal` is aborted by the effect below whenever the query or mode
+  // changes, so a slow response for the OLD query/mode can never land after
+  // (and overwrite) a newer one. Added alongside the third mode: switching
+  // between Hacks / Author / Base ROM re-runs the same query against a
+  // different field, which makes that overlap far easier to hit than it was
+  // with typing alone. Aborted runs skip their state updates entirely.
+  const search = useCallback(async (q: string, target: SearchTarget, signal?: AbortSignal) => {
     if (q.length < 2) {
       setResults(null);
+      setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&by=${target}`);
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&by=${target}`, { signal });
       const data = await res.json();
-      setResults(data);
+      if (!signal?.aborted) setResults(data);
+    } catch {
+      // Aborted (superseded by a newer search) or a network failure — either
+      // way, don't leave results from a search that didn't complete.
+      if (!signal?.aborted) setResults(null);
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    const timer = setTimeout(() => search(query, by), 300);
-    return () => clearTimeout(timer);
+    const controller = new AbortController();
+    const timer = setTimeout(() => search(query, by, controller.signal), 300);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [query, by, search]);
 
   // A dropped ROM file only makes sense as "does anyone have a hack for
@@ -100,6 +117,18 @@ export function SearchInterface() {
         >
           Base ROM
         </button>
+        <button
+          type="button"
+          onClick={() => setBy('author')}
+          className={clsx(
+            'px-3 py-1.5 rounded-full text-xs font-medium border transition-colors',
+            by === 'author'
+              ? 'bg-phosphor/15 border-phosphor/40 text-phosphor'
+              : 'bg-bg-surface border-border text-text-secondary hover:border-phosphor/30'
+          )}
+        >
+          Author
+        </button>
       </div>
 
       <div className="relative mb-4">
@@ -108,7 +137,7 @@ export function SearchInterface() {
           autoFocus
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={by === 'baserom' ? 'Type a base ROM name or paste its hash…' : 'Type a hack name or paste a hash…'}
+          placeholder={by === 'baserom' ? 'Type a base ROM name or paste its hash…' : by === 'author' ? 'Type an author name…' : 'Type a hack name or paste a hash…'}
           className="w-full pl-10 pr-10 py-3 rounded-lg bg-bg-surface border border-border text-sm font-mono placeholder:font-sans placeholder:text-text-muted focus:border-phosphor/50"
         />
         {loading && <Loader2 size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-phosphor animate-spin" />}
@@ -196,7 +225,11 @@ export function SearchInterface() {
 
           {results.submissions.length === 0 && results.entries.length === 0 && (
             <p className="text-text-muted text-sm text-center py-12">
-              {by === 'baserom' ? `No hacks found using a base ROM matching "${query}".` : `No results for "${query}".`}
+              {by === 'baserom'
+                ? `No hacks found using a base ROM matching "${query}".`
+                : by === 'author'
+                  ? `No hacks found by an author matching "${query}".`
+                  : `No results for "${query}".`}
             </p>
           )}
         </div>

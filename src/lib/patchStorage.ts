@@ -87,7 +87,12 @@ export function buildPatchDisplaySlug(hackName: string, version: string): string
   return slug || 'patch';
 }
 
-function resolveStoredPath(sha1: string, patchType: PatchTypeValue, displaySlug: string): string {
+// Exported specifically so callers that need to SHOW the exact path being
+// checked (patchReconcile.ts's diagnostics, so a person can manually `ls`
+// or `stat` the real file themselves rather than trust a bare "not found")
+// can do so without duplicating this logic. Every other function in this
+// file already routes through it.
+export function resolveStoredPath(sha1: string, patchType: PatchTypeValue, displaySlug: string): string {
   // Re-checked here (not just by the endpoint calling in) because this is
   // the function that actually touches the filesystem — the one place a
   // bug elsewhere absolutely cannot be allowed to turn into a path outside
@@ -138,6 +143,59 @@ export async function patchFileExists(
     return true;
   } catch {
     return false;
+  }
+}
+
+// Like patchFileExists, but also returns the real on-disk byte size in the
+// same fs call rather than requiring a second one — used anywhere that's
+// about to trust/record patchFileSize (a re-import re-linking a submission
+// to a patch file that survived a database rebuild; a full backup restore
+// verifying an already-set patchUploadedAt still points at a real file), so
+// the recorded size is always read from the actual file, never copied from
+// an untrusted export. Returns null (not a thrown error) when the file
+// doesn't exist — the normal, expected outcome for a submission whose patch
+// was declared but never uploaded, or whose stored file genuinely didn't
+// survive whatever the database lost — same "missing is a valid outcome,
+// not a crash" shape as patchFileExists above.
+export async function statPatchFile(
+  sha1: string,
+  patchType: PatchTypeValue,
+  displaySlug: string
+): Promise<{ size: number } | null> {
+  try {
+    const stat = await fs.stat(resolveStoredPath(sha1, patchType, displaySlug));
+    return { size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+// Like statPatchFile, but distinguishes a genuinely-missing file from any
+// OTHER filesystem error (permissions, a transient mount hiccup, too many
+// concurrent handles) instead of collapsing both into the same "not there"
+// result. Exists specifically for call sites where "not found" triggers a
+// destructive correction (clearing a submission's patch-uploaded state) —
+// for those, treating an inconclusive error as "missing" risks acting on
+// bad information. patchFileExists/statPatchFile above stay as they are
+// (unchanged) for lower-stakes callers (e.g. the detailed-DAT-reimport
+// reattachment check) where "couldn't tell" and "not there" both correctly
+// resolve to the same safe default of not touching anything.
+export type PatchFileCheckResult =
+  | { status: 'found'; size: number }
+  | { status: 'not-found' }
+  | { status: 'error'; error: unknown };
+
+export async function statPatchFileStrict(
+  sha1: string,
+  patchType: PatchTypeValue,
+  displaySlug: string
+): Promise<PatchFileCheckResult> {
+  try {
+    const stat = await fs.stat(resolveStoredPath(sha1, patchType, displaySlug));
+    return { status: 'found', size: stat.size };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { status: 'not-found' };
+    return { status: 'error', error: err };
   }
 }
 

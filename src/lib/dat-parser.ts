@@ -33,6 +33,15 @@ export interface ParsedDatEntry {
   patchType?: string;
   patchFilename?: string;
   patchSha1?: string;
+  // The slug baked into the stored file's name on disk at upload time
+  // (see src/lib/patchStorage.ts) — present only for a "detailed" export
+  // re-import made after this field was added. Lets the import route find
+  // the physical patch file again (if it survived a database rebuild)
+  // without guessing at the current hackName/version. Absent for an
+  // export made before this field existed, or for a plain DAT/lean-JSON
+  // source, which never had patch data at all — the import route falls
+  // back to recomputing a slug from hackName/version in that case.
+  patchStoredSlug?: string;
   // The base rom this entry's patch expects, if the source database had
   // one recorded (see src/lib/baseRom.ts) — present only for a "detailed"
   // export re-import. status is carried through so re-importing an already-
@@ -43,6 +52,13 @@ export interface ParsedDatEntry {
     crc32: string;
     md5: string;
     sha1: string;
+    status?: string;
+  };
+  // The franchise this entry's hack belongs to, if the source database had
+  // one — present only for a "detailed" export re-import. status carried
+  // through so an already-approved franchise isn't reset to pending.
+  franchise?: {
+    name: string;
     status?: string;
   };
   // Other compressed/container copies of this exact file (see the
@@ -229,6 +245,7 @@ export function parseDatJson(jsonText: string): ParsedDatEntry[] {
         ...(d?.patch?.type ? { patchType: String(d.patch.type).trim() } : {}),
         ...(d?.patch?.filename ? { patchFilename: String(d.patch.filename).trim() } : {}),
         ...(d?.patch?.sha1 ? { patchSha1: String(d.patch.sha1).trim() } : {}),
+        ...(d?.patch?.storedSlug ? { patchStoredSlug: String(d.patch.storedSlug).trim() } : {}),
         ...(d?.baseRom?.name && d?.baseRom?.sha1 && d?.baseRom?.crc32 && d?.baseRom?.md5
           ? {
               baseRom: {
@@ -238,6 +255,14 @@ export function parseDatJson(jsonText: string): ParsedDatEntry[] {
                 md5: String(d.baseRom.md5).trim().toLowerCase(),
                 sha1: String(d.baseRom.sha1).trim().toLowerCase(),
                 ...(d.baseRom.status ? { status: String(d.baseRom.status).trim() } : {}),
+              },
+            }
+          : {}),
+        ...(d?.franchise?.name
+          ? {
+              franchise: {
+                name: String(d.franchise.name).trim(),
+                ...(d.franchise.status ? { status: String(d.franchise.status).trim() } : {}),
               },
             }
           : {}),

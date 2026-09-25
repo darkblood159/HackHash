@@ -11,6 +11,7 @@ import { ALL_TAG_SLUGS, ensureTagsExist } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 import { propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
+import { validateFranchiseAssignment, propagateFranchise, FranchiseAssignError } from '@/lib/franchise';
 import { resolveMachineName, triggerHasheousPushForSubmission } from '@/lib/approval';
 
 // ─── GET /api/submissions/:id ─────────────────────────────────────────────────
@@ -161,7 +162,7 @@ export async function PATCH(
 
   const body = await req.json();
   const allowedFields = ['hackName', 'version', 'description', 'versionChangelog', 'author', 'releaseYear', 'releaseDate', 'platform',
-    'sourceUrl', 'notes', 'releasePageUrl', 'githubUrl', 'patchType', 'patchFilename', 'patchSha1', 'baseRomId'];
+    'sourceUrl', 'notes', 'releasePageUrl', 'githubUrl', 'patchType', 'patchFilename', 'patchSha1', 'baseRomId', 'franchiseId'];
 
   const updateData: Record<string, unknown> = {};
   for (const field of allowedFields) {
@@ -266,6 +267,30 @@ export async function PATCH(
     }
   }
 
+  // franchiseId: OPTIONAL on a submission (unlike baseRomId above), so null
+  // is a legitimate value here — "remove the franchise" — and only a
+  // non-null id needs checking against the live table. Same clean-4xx-
+  // instead-of-a-raw-FK-500 reasoning as the base rom check just above.
+  let franchiseChangeDetail: { from: string | null; to: string | null; toName: string | null } | null = null;
+  if ('franchiseId' in updateData) {
+    const nextFranchiseId = updateData.franchiseId;
+    if (nextFranchiseId !== null && (typeof nextFranchiseId !== 'string' || nextFranchiseId === '')) {
+      return NextResponse.json({ error: 'Invalid franchise' }, { status: 400 });
+    }
+    let toName: string | null = null;
+    if (nextFranchiseId) {
+      try {
+        toName = (await validateFranchiseAssignment(prisma, nextFranchiseId as string)).name;
+      } catch (err) {
+        if (err instanceof FranchiseAssignError) {
+          return NextResponse.json({ error: err.message }, { status: err.status });
+        }
+        throw err;
+      }
+    }
+    franchiseChangeDetail = { from: submission.franchiseId ?? null, to: (nextFranchiseId as string | null), toName };
+  }
+
   let updated;
   try {
     updated = await prisma.$transaction(async (tx) => {
@@ -328,6 +353,9 @@ export async function PATCH(
         if (hasTagChanges) {
           await propagateTags(tx, submission.hackFamilyId, params.id, resolvedTagIds);
         }
+        if (franchiseChangeDetail) {
+          await propagateFranchise(tx, submission.hackFamilyId, params.id, franchiseChangeDetail.to);
+        }
       }
 
       return result;
@@ -355,8 +383,9 @@ export async function PATCH(
       details: {
         fields: [...Object.keys(updateData), ...Object.keys(mappingChanges), ...(hasTagChanges ? ['tags'] : [])],
         by: session.user.id,
-        appliedToAllVersions: !!submission.hackFamilyId && applyToAllVersions && (hasSharedChanges || hasTagChanges),
+        appliedToAllVersions: !!submission.hackFamilyId && applyToAllVersions && (hasSharedChanges || hasTagChanges || !!franchiseChangeDetail),
         ...(baseRomChangeDetail ? { baseRomChange: baseRomChangeDetail } : {}),
+        ...(franchiseChangeDetail ? { franchiseChange: franchiseChangeDetail } : {}),
       },
       userId: session.user.id,
       submissionId: params.id,

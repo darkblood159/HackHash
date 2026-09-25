@@ -12,6 +12,8 @@ import { SubmissionFilters } from '@/components/SubmissionFilters';
 import { PlatformFilters } from '@/components/PlatformFilters';
 import { TagFilters } from '@/components/TagFilters';
 import { PatchFilters } from '@/components/PatchFilters';
+import { FranchiseFilter } from '@/components/FranchiseFilter';
+import { getFranchiseFilterOptions } from '@/lib/franchise';
 import { PLATFORMS } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -21,7 +23,7 @@ const STATUSES = ['PENDING', 'COMMUNITY_VERIFIED', 'RECOMMENDED', 'APPROVED', 'R
 export default async function SubmissionsPage({
   searchParams,
 }: {
-  searchParams: { status?: string; platform?: string; tag?: string; baseRomId?: string; hasPatch?: string };
+  searchParams: { status?: string; platform?: string; tag?: string; baseRomId?: string; hasPatch?: string; franchise?: string; author?: string };
 }) {
   const status = searchParams.status && STATUSES.includes(searchParams.status) ? searchParams.status : undefined;
   const platform = searchParams.platform && (PLATFORMS as readonly string[]).includes(searchParams.platform)
@@ -49,6 +51,15 @@ export default async function SubmissionsPage({
       })
     : null;
 
+  // Same stale-id-falls-back-to-no-filter treatment as baseRomFilter above.
+  const franchiseFilter = searchParams.franchise
+    ? await prisma.franchise.findUnique({ where: { id: searchParams.franchise }, select: { id: true, name: true } })
+    : null;
+  const franchiseOptions = await getFranchiseFilterOptions(prisma, 'submissions', franchiseFilter);
+  // Exact (case-insensitive) author-name match — see the matching comment
+  // in src/app/entries/page.tsx for why this isn't a "contains".
+  const author = searchParams.author?.trim() || undefined;
+
   const submissions = await prisma.submission.findMany({
     where: {
       deletedAt: null,
@@ -56,12 +67,15 @@ export default async function SubmissionsPage({
       ...(platform ? { platform: platform as any } : {}),
       ...(tag ? { tags: { some: { tag: { slug: tag } } } } : {}),
       ...(baseRomFilter ? { baseRomId: baseRomFilter.id } : {}),
+      ...(franchiseFilter ? { franchiseId: franchiseFilter.id } : {}),
+      ...(author ? { author: { equals: author, mode: 'insensitive' as const } } : {}),
       ...(hasPatch === 'yes' ? { patchUploadedAt: { not: null } } : {}),
       ...(hasPatch === 'no' ? { patchUploadedAt: null } : {}),
     },
     include: {
       submittedBy: { select: { id: true, name: true, image: true, username: true } },
       tags: { include: { tag: true } },
+      franchise: { select: { id: true, name: true } },
       _count: { select: { verifications: true, comments: true } },
     },
     orderBy: [{ verificationScore: 'desc' }, { createdAt: 'desc' }],
@@ -76,7 +90,20 @@ export default async function SubmissionsPage({
   if (platform) clearBaseRomParams.set('platform', platform);
   if (tag) clearBaseRomParams.set('tag', tag);
   if (hasPatch) clearBaseRomParams.set('hasPatch', hasPatch);
+  if (franchiseFilter) clearBaseRomParams.set('franchise', franchiseFilter.id);
+  if (author) clearBaseRomParams.set('author', author);
   const clearBaseRomHref = `/submissions${clearBaseRomParams.toString() ? `?${clearBaseRomParams.toString()}` : ''}`;
+
+  // Drops only the author filter, keeps every other active one — same
+  // approach as clearBaseRomHref above.
+  const clearAuthorParams = new URLSearchParams();
+  if (status) clearAuthorParams.set('status', status);
+  if (platform) clearAuthorParams.set('platform', platform);
+  if (tag) clearAuthorParams.set('tag', tag);
+  if (hasPatch) clearAuthorParams.set('hasPatch', hasPatch);
+  if (baseRomFilter) clearAuthorParams.set('baseRomId', baseRomFilter.id);
+  if (franchiseFilter) clearAuthorParams.set('franchise', franchiseFilter.id);
+  const clearAuthorHref = `/submissions${clearAuthorParams.toString() ? `?${clearAuthorParams.toString()}` : ''}`;
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-12">
@@ -91,6 +118,17 @@ export default async function SubmissionsPage({
         <PlatformFilters current={platform} />
         <TagFilters current={tag} />
         <PatchFilters current={hasPatch} />
+        <FranchiseFilter options={franchiseOptions} current={franchiseFilter?.id} />
+        {author && (
+          <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-phosphor/30 bg-phosphor/5 text-xs">
+            <span className="text-text-secondary">
+              Showing hacks by <span className="text-phosphor font-medium">{author}</span>
+            </span>
+            <Link href={clearAuthorHref} className="ml-auto text-text-muted hover:text-phosphor underline shrink-0">
+              Clear
+            </Link>
+          </div>
+        )}
         {baseRomFilter && (
           <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-phosphor/30 bg-phosphor/5 text-xs">
             <span className="text-text-secondary">
@@ -136,9 +174,27 @@ export default async function SubmissionsPage({
                 </h3>
                 <span className="text-text-muted text-sm">v{sub.version}</span>
                 <PlatformBadge platform={sub.platform} size="sm" />
+                {sub.franchise && (
+                  // `relative` lifts this above the card's full-cover link so it's
+                  // independently clickable, same as the tag badges below.
+                  <Link
+                    href={`/submissions?franchise=${sub.franchise.id}`}
+                    className="relative text-[10px] px-1.5 py-0.5 rounded border border-border text-text-secondary hover:text-phosphor hover:border-phosphor/40 transition-colors"
+                  >
+                    {sub.franchise.name}
+                  </Link>
+                )}
               </div>
               <p className="text-xs text-text-muted mt-0.5">
-                {sub.author && <>by {sub.author} · </>}submitted {formatDistanceToNow(new Date(sub.createdAt), { addSuffix: true })} ·{' '}
+                {sub.author && (
+                  <>
+                    by{' '}
+                    <Link href={`/submissions?author=${encodeURIComponent(sub.author)}`} className="relative hover:text-phosphor hover:underline">
+                      {sub.author}
+                    </Link>{' '}
+                    ·{' '}
+                  </>
+                )}submitted {formatDistanceToNow(new Date(sub.createdAt), { addSuffix: true })} ·{' '}
                 {sub._count.verifications} verification{sub._count.verifications !== 1 ? 's' : ''}
               </p>
               {sub.tags.length > 0 && (

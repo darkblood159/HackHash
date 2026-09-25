@@ -9,6 +9,7 @@ import { NULLABLE_FIELD_LIMITS, isNullableLimitField } from '@/lib/fieldLimits';
 import { MAPPING_FIELD_KEYS, stripMappingValues, isMappingFieldKey } from '@/lib/mappingFields';
 import { SHARED_FIELD_KEYS } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
+import { validateFranchiseAssignment, FranchiseAssignError } from '@/lib/franchise';
 import { ALL_TAG_SLUGS } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 
@@ -82,9 +83,19 @@ const changeRequestSchema = z.object({
     id: z.string(),
     name: z.string(),
   }).optional(),
+  // Proposed franchise change — same { id, name } display-snapshot shape as
+  // proposedFamily, INCLUDING the null-id case: franchise is optional on a
+  // submission, so "remove the franchise" is a legitimate thing to propose
+  // (unlike base rom, which is required). Re-validated against the live
+  // Franchise by id below and again at approval time
+  // (reassignSubmissionFranchise in src/lib/franchise.ts).
+  proposedFranchise: z.object({
+    id: z.string().nullable(),
+    name: z.string().nullable(),
+  }).optional(),
 }).refine(
-  (data) => Object.keys(data.changes).length > 0 || data.proposedTags !== undefined || data.proposedTranslationLanguages !== undefined || data.proposedFamily !== undefined || data.proposedBaseRom !== undefined,
-  { message: 'Propose at least one change — a field edit, a tag change, a family change, or a base ROM change' }
+  (data) => Object.keys(data.changes).length > 0 || data.proposedTags !== undefined || data.proposedTranslationLanguages !== undefined || data.proposedFamily !== undefined || data.proposedBaseRom !== undefined || data.proposedFranchise !== undefined,
+  { message: 'Propose at least one change — a field edit, a tag change, a family change, a base ROM change, or a franchise change' }
 );
 
 // FLAGGED-BUT-DEFERRED GAP, NOW CLOSED (see CLAUDE_HANDOFF.txt section 2w):
@@ -199,6 +210,20 @@ export async function POST(
     }
   }
 
+  // Courtesy check now, authoritative re-check at approval time — same
+  // two-ends-share-one-helper arrangement as proposedBaseRom above. Only a
+  // non-null id needs checking; null just means "remove it".
+  if (parsed.data.proposedFranchise?.id) {
+    try {
+      await validateFranchiseAssignment(prisma, parsed.data.proposedFranchise.id);
+    } catch (err) {
+      if (err instanceof FranchiseAssignError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
+  }
+
   const changeRequest = await prisma.changeRequest.create({
     data: {
       submissionId: params.id,
@@ -210,6 +235,7 @@ export async function POST(
       proposedTranslationLanguages: parsed.data.proposedTranslationLanguages !== undefined ? (parsed.data.proposedTranslationLanguages as any) : undefined,
       proposedFamily: parsed.data.proposedFamily !== undefined ? (parsed.data.proposedFamily as any) : undefined,
       proposedBaseRom: parsed.data.proposedBaseRom !== undefined ? (parsed.data.proposedBaseRom as any) : undefined,
+      proposedFranchise: parsed.data.proposedFranchise !== undefined ? (parsed.data.proposedFranchise as any) : undefined,
     },
     include: {
       requestedBy: { select: { id: true, name: true, image: true } },
@@ -227,6 +253,7 @@ export async function POST(
         proposedTranslationLanguages: parsed.data.proposedTranslationLanguages,
         proposedFamily: parsed.data.proposedFamily,
         proposedBaseRom: parsed.data.proposedBaseRom,
+        proposedFranchise: parsed.data.proposedFranchise,
       },
       userId: session.user.id,
       submissionId: params.id,

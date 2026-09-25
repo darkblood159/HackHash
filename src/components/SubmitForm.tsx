@@ -8,6 +8,7 @@ import { ROMProcessor } from './ROMProcessor';
 import { MappingsSection, type MappingValues } from './MappingsSection';
 import { HackNameAutocomplete, type HackFamilySuggestion } from './HackNameAutocomplete';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
+import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
 import { Button } from './ui/Button';
 import { AlertTriangle, CheckCircle2, ChevronLeft, FileWarning, Loader2, Sparkles } from 'lucide-react';
 import type { ROMFileInfo } from '@/types';
@@ -18,7 +19,7 @@ import { TagsEditor } from './TagsEditor';
 import { LanguagePicker } from './LanguagePicker';
 import { parseRomFilename } from '@/lib/filenameParser';
 import { MAPPING_FIELD_KEYS } from '@/lib/mappingFields';
-import { PATCH_TYPES } from '@/lib/patchTypes';
+import { PATCH_TYPES, patchTypeLabel } from '@/lib/patchTypes';
 import { PatchDropzone, type ParsedPatch } from './PatchDropzone';
 
 interface FormState {
@@ -93,6 +94,12 @@ export function SubmitForm() {
   const [romInfo, setRomInfo] = useState<ROMFileInfo | null>(null);
   const [form, setForm] = useState<FormState>(initialForm);
   const [baseRom, setBaseRom] = useState<SelectedBaseRom | null>(null);
+  // Optional (null = "no franchise"). Mirrored in a ref so the async
+  // prefill paths below — which run from closures that can be stale by the
+  // time their fetch resolves — can check "has the person already picked
+  // one?" against the CURRENT value, not the one captured when they started.
+  const [franchise, setFranchise] = useState<SelectedFranchise | null>(null);
+  const franchiseRef = useRef<SelectedFranchise | null>(null);
   const [step, setStep] = useState<1 | 2>(1);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -113,7 +120,15 @@ export function SubmitForm() {
     suggestions: Array<{ id: string; name: string; distance: number }>;
   } | null>(null);
   const [dismissedSuggestionFor, setDismissedSuggestionFor] = useState<string | null>(null);
-  const [applyToAllVersions, setApplyToAllVersions] = useState(true);
+  // Defaults OFF (not on) — this checkbox controls whether submitting this
+  // form pushes author/release date/description/tags out to every OTHER
+  // version of the hack, overwriting whatever's there now. Defaulting it
+  // on meant someone adding a version could silently overwrite another
+  // version's already-correct, deliberately-different details just by
+  // not noticing a checkbox — a real complaint, not hypothetical. Someone
+  // who does want the sync can still tick it; this only changes what
+  // happens if nobody touches it.
+  const [applyToAllVersions, setApplyToAllVersions] = useState(false);
   // Whether the release-date section is in "I only know the year" mode —
   // toggles between the <input type="date"> and the plain year fallback
   // right below it. Kept outside FormState (like applyToAllVersions above)
@@ -159,6 +174,20 @@ export function SubmitForm() {
   // — those are per-version by design, not something to copy from a
   // sibling. Only fills fields that are currently empty, same
   // never-clobber-what-was-typed rule as everywhere else in this flow.
+  // Single funnel for changing the franchise, so the state, the ref, and the
+  // "auto-filled" badge can never disagree. `auto` = filled from a family or
+  // an earlier version rather than picked by the person.
+  const applyFranchise = (next: SelectedFranchise | null, auto = false) => {
+    franchiseRef.current = next;
+    setFranchise(next);
+    setAutoFilledFields((prev) => {
+      if (auto === prev.has('franchise')) return prev;
+      const updated = new Set(prev);
+      if (auto) updated.add('franchise'); else updated.delete('franchise');
+      return updated;
+    });
+  };
+
   const applyFamilyPrefill = async (familyId: string) => {
     try {
       const res = await fetch(`/api/entries/hack-family/${familyId}`);
@@ -191,6 +220,8 @@ export function SubmitForm() {
         return next;
       });
       if (filled.size > 0) setAutoFilledFields((prev) => new Set([...Array.from(prev), ...Array.from(filled)]));
+      // Only when nothing's been picked yet — never clobbers a choice.
+      if (data.franchise && !franchiseRef.current) applyFranchise(data.franchise, true);
     } catch {
       // Non-fatal — same convenience-not-gate philosophy as the rest of this.
     }
@@ -319,6 +350,7 @@ export function SubmitForm() {
         });
         if (filled.size > 0) setAutoFilledFields((prev) => new Set([...Array.from(prev), ...Array.from(filled)]));
         if (data.baseRom) setBaseRom(data.baseRom);
+        if (data.franchise && !franchiseRef.current) applyFranchise(data.franchise, true);
 
         // Surfaces the "this will be added as a new version of X" banner
         // (with this flow's own wording, see isAddingNewVersion below)
@@ -465,6 +497,8 @@ export function SubmitForm() {
             // wholesale, whether or not it happens to already match
             // earlyDuplicate's existing base rom.
             ...(baseRom ? { proposedBaseRom: { id: baseRom.id, name: baseRom.name } } : {}),
+            // Same "only if it actually has a value" rule as baseRom above.
+            ...(franchise ? { proposedFranchise: { id: franchise.id, name: franchise.name } } : {}),
             applyToAllVersions,
             reason: 'Submitted while trying to upload a file that matched an existing entry\'s hash — proposed information for the existing entry instead of a new submission.',
           }),
@@ -511,6 +545,7 @@ export function SubmitForm() {
           patchFilename: form.patchFilename || undefined,
           patchSha1: form.patchSha1 || undefined,
           baseRomId: baseRom!.id,
+          franchiseId: franchise?.id,
           notes: form.notes || undefined,
           releasePageUrl: form.releasePageUrl || undefined,
           githubUrl: form.githubUrl || undefined,
@@ -926,7 +961,7 @@ export function SubmitForm() {
                   onChange={(e) => setApplyToAllVersions(e.target.checked)}
                   className="accent-phosphor"
                 />
-                Keep author/release date/description/tags in sync across all versions of this hack
+                Keep author/release date/description/tags/franchise in sync across all versions of this hack
               </label>
             </div>
           )}
@@ -939,6 +974,17 @@ export function SubmitForm() {
               <BaseRomPicker platform={form.platform} value={baseRom} onChange={setBaseRom} />
             </Field>
           </div>
+
+          {/* Franchise (optional) — same pick-from-the-list-first idea as Base
+              ROM above, for the same reason: so hacks of the same franchise
+              end up under ONE name instead of three near-duplicates. */}
+          <Field
+            label="Franchise"
+            hint="Optional — the game series this hack belongs to (Super Mario, Zelda, Pokémon…). Pick an existing one so hacks group together; only add a new one if it isn't listed."
+            autoFilled={autoFilledFields.has('franchise')}
+          >
+            <FranchisePicker value={franchise} onChange={(next) => applyFranchise(next)} />
+          </Field>
 
           <Field label="Description" hint="What does this hack change? Optional, but helps verifiers and future archivists." autoFilled={autoFilledFields.has('description')}>
             <textarea rows={4} className={inputClass} value={form.description} onChange={(e) => update('description', e.target.value)} placeholder="A complete overhaul of the original level design with..." />
@@ -988,7 +1034,7 @@ export function SubmitForm() {
                 <Field label="Patch type" autoFilled={autoFilledFields.has('patchType')}>
                   <select className={inputClass} value={form.patchType} onChange={(e) => update('patchType', e.target.value)}>
                     <option value="">None</option>
-                    {PATCH_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                    {PATCH_TYPES.map((t) => <option key={t} value={t}>{patchTypeLabel(t)}</option>)}
                   </select>
                 </Field>
                 <Field label="Patch filename" autoFilled={autoFilledFields.has('patchFilename')}>

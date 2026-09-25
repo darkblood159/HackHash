@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { isMappingFieldKey } from '@/lib/mappingFields';
 import { isSharedFieldKey, propagateSharedFields, propagateTags, reassignSubmissionFamily, FamilyReassignError, resolveReleaseFields } from '@/lib/hackFamily';
 import { reassignSubmissionBaseRom, BaseRomAssignError } from '@/lib/baseRom';
+import { reassignSubmissionFranchise, FranchiseAssignError } from '@/lib/franchise';
 import { resolveMachineName, triggerHasheousPushForSubmission } from '@/lib/approval';
 import { ensureTagsExist } from '@/lib/tags';
 
@@ -217,6 +218,21 @@ export async function POST(
         );
       }
 
+      // Franchise change. Unlike proposedBaseRom, id may be null here
+      // ("remove the franchise") since franchise is optional. Unlike
+      // family/base-rom reassignment above, this DOES honor
+      // applyToAllVersions — franchise is family-shared the way tags are,
+      // so a proposal made with "apply to every version" checked fans out to
+      // the rest of the hack's versions. reassignSubmissionFranchise()
+      // re-validates the target by id (never trusting the proposal's name
+      // snapshot) and reads the submission's CURRENT family, which the
+      // family reassignment a few lines up may just have changed.
+      const hasFranchiseChange = changeRequest.proposedFranchise !== null && changeRequest.proposedFranchise !== undefined;
+      if (hasFranchiseChange) {
+        const proposed = changeRequest.proposedFranchise as { id: string | null; name: string | null };
+        await reassignSubmissionFranchise(tx, changeRequest.submissionId, proposed.id, session.user.id, changeRequest.applyToAllVersions);
+      }
+
       await tx.changeRequest.update({
         where: { id: params.id },
         data: { status: 'APPROVED', reviewedById: session.user.id, reviewedAt: new Date(), reviewNote },
@@ -231,6 +247,7 @@ export async function POST(
             proposedTranslationLanguages: changeRequest.proposedTranslationLanguages,
             proposedFamily: changeRequest.proposedFamily,
             proposedBaseRom: changeRequest.proposedBaseRom,
+            proposedFranchise: changeRequest.proposedFranchise,
             reviewNote,
             appliedToAllVersions: (hasSharedChanges || hasTagChanges) && !!changeRequest.submission.hackFamilyId && changeRequest.applyToAllVersions,
           },
@@ -244,6 +261,9 @@ export async function POST(
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
     if (err instanceof BaseRomAssignError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    if (err instanceof FranchiseAssignError) {
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
     if (err?.code === 'P2002') {

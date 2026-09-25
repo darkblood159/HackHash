@@ -10,6 +10,7 @@ interface Stats {
   approvedCount: number;
   submissionCount: number;
   userCount: number;
+  patchCount: number;
 }
 
 function HexRain() {
@@ -50,6 +51,7 @@ function StatTicker({ stats }: { stats: Stats }) {
     <div className="flex flex-wrap items-center gap-x-8 gap-y-3">
       {[
         { label: 'Approved entries', value: stats.approvedCount },
+        { label: 'Patches available', value: stats.patchCount },
         { label: 'Submissions tracked', value: stats.submissionCount },
         { label: 'Contributors', value: stats.userCount },
       ].map((s) => (

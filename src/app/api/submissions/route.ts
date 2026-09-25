@@ -10,6 +10,7 @@ import { ensureTagsExist } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 import { resolveOrCreateFamily, propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
 import { checkSubmissionsRateLimit, rateLimitedResponse } from '@/lib/rateLimit';
+import { validateFranchiseAssignment, propagateFranchise, FranchiseAssignError } from '@/lib/franchise';
 
 const createSubmissionSchema = z.object({
   hackName: z.string().min(1).max(200),
@@ -37,7 +38,7 @@ const createSubmissionSchema = z.object({
   crc32: z.string().regex(/^[0-9a-f]{8}$/i),
   md5: z.string().regex(/^[0-9a-f]{32}$/i),
   sha1: z.string().regex(/^[0-9a-f]{40}$/i),
-  patchType: z.enum(['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS']).optional(),
+  patchType: z.enum(['IPS', 'BPS', 'UPS', 'XDELTA', 'PPF', 'APS', 'OTHER']).optional(),
   patchFilename: z.string().max(500).optional(),
   patchSha1: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
   // Required — every submission needs a base rom reference. References an
@@ -45,6 +46,11 @@ const createSubmissionSchema = z.object({
   // one happens via a separate call to POST /api/base-roms before the
   // submit form ever gets here, not as part of this payload.
   baseRomId: z.string().min(1, 'A base ROM is required'),
+  // OPTIONAL — unlike baseRomId, a hack doesn't have to belong to a
+  // franchise. References an EXISTING Franchise row (see src/lib/franchise.ts);
+  // proposing a brand-new one happens via POST /api/franchises before the
+  // form gets here, same as base roms via POST /api/base-roms.
+  franchiseId: z.string().min(1).optional(),
   notes: z.string().max(5000).optional(),
   releasePageUrl: z.string().url().optional().or(z.literal('')),
   githubUrl: z.string().url().optional().or(z.literal('')),
@@ -187,6 +193,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'That base ROM no longer exists — please pick or hash one again.' }, { status: 400 });
   }
 
+  if (data.franchiseId) {
+    try {
+      await validateFranchiseAssignment(prisma, data.franchiseId);
+    } catch (err) {
+      if (err instanceof FranchiseAssignError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
+  }
+
   // Normalize hashes to lowercase
   const sha1 = data.sha1.toLowerCase();
   const md5 = data.md5.toLowerCase();
@@ -235,6 +252,7 @@ export async function POST(req: NextRequest) {
       patchFilename: data.patchFilename,
       patchSha1: data.patchSha1?.toLowerCase(),
       baseRomId: data.baseRomId,
+      franchiseId: data.franchiseId,
       notes: data.notes,
       releasePageUrl: data.releasePageUrl || null,
       githubUrl: data.githubUrl || null,
@@ -302,6 +320,12 @@ export async function POST(req: NextRequest) {
         if (data.tags !== undefined) {
           const tagRows = data.tags.length ? await ensureTagsExist(tx, data.tags) : [];
           await propagateTags(tx, familyId, submission.id, tagRows.map((t) => t.id));
+        }
+        // Only when a franchise was actually chosen — "left blank" on this
+        // form means "didn't say", not "clear it everywhere", so it never
+        // wipes a franchise the other versions already have.
+        if (data.franchiseId) {
+          await propagateFranchise(tx, familyId, submission.id, data.franchiseId);
         }
       });
     } catch (err: any) {

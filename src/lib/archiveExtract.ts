@@ -1,10 +1,17 @@
 // src/lib/archiveExtract.ts
 //
-// Client-side (browser-only) archive reading for ROMProcessor.tsx, so a
-// submitter can drop a .zip/.gz/.7z/.rar straight in instead of having to
-// extract it themselves first. Everything here runs entirely in the
-// browser, same as the hashing it feeds into — an archive's bytes never
-// leave the client any more than a raw ROM's do.
+// Client-side (browser-only) archive reading — originally built for
+// ROMProcessor.tsx so a submitter could drop a .zip/.gz/.7z/.rar straight
+// in instead of extracting it themselves first, and reused as-is by
+// PatchFileUpload.tsx for the exact same reason on the patch-upload side
+// (see pickAutoPatchCandidate near the bottom — the only patch-specific
+// addition; everything else below is unchanged and format-agnostic
+// already). Everything here runs entirely in the browser, same as the
+// hashing/uploading it feeds into either way — an archive's bytes never
+// leave the client any more than a raw file's do, until whichever caller
+// explicitly uploads what comes out of it (ROMProcessor never does;
+// PatchFileUpload does, exactly as it already did for a non-archive
+// upload).
 //
 // SCOPE: .zip (via jszip, already a dependency) and .gz (via the browser's
 // native DecompressionStream, zero new dependency) are handled with
@@ -28,6 +35,7 @@
 
 import JSZip from 'jszip';
 import { looksLikeRomFile, looksLikeKnownNonRomFile } from './romExtensions';
+import { patchTypeFromFilename } from './patchTypes';
 
 const MAX_EXTRACT_BYTES = 8 * 1024 * 1024 * 1024; // 8 GiB — see file header.
 
@@ -182,6 +190,34 @@ export function pickAutoCandidate(candidates: ArchiveCandidate[]): ArchiveCandid
     if (notObviouslyNonRom.length === 1) return notObviouslyNonRom[0];
   }
 
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+// Same job as pickAutoCandidate above, for PatchFileUpload.tsx instead of
+// ROMProcessor.tsx — picks the one file inside an archive that's actually
+// the patch, when it's unambiguous. Deliberately its own function rather
+// than a parameter bolted onto pickAutoCandidate: the two need different
+// classifiers (patchTypeFromFilename's six extensions here, vs.
+// ROM_FILE_EXTENSIONS there) and, more importantly, different SHAPES of
+// candidate list in practice — a ROM archive routinely has multiple
+// files (regional variants, a manual, cover art) and needs three
+// confidence tiers to resolve most of them without asking; a patch
+// archive is almost always just the one patch file plus maybe a readme,
+// so two tiers already covers the realistic cases:
+//  1. Exactly one file has a recognized patch extension
+//     (patchTypeFromFilename, patchTypes.ts — the same six formats the
+//     server itself detects from bytes on upload, see patchValidation.ts).
+//  2. Nothing matched an extension, but there's exactly one real file in
+//     the archive, period — nothing else it could be, regardless of name
+//     (mirrors pickAutoCandidate's own tier 3 for the same reason).
+// Anything less certain than that (e.g. two files that both look like
+// patches — different regions/revisions bundled together) returns null,
+// and the caller shows the picker instead of guessing which one to
+// upload — guessing wrong here means silently uploading the wrong
+// version's patch, not just a wrong ROM hash.
+export function pickAutoPatchCandidate(candidates: ArchiveCandidate[]): ArchiveCandidate | null {
+  const patchMatches = candidates.filter((c) => patchTypeFromFilename(c.basename) !== null);
+  if (patchMatches.length === 1) return patchMatches[0];
   return candidates.length === 1 ? candidates[0] : null;
 }
 

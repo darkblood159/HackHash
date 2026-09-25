@@ -33,9 +33,9 @@ import { prisma } from '@/lib/prisma';
 import { checkPatchUploadRateLimit, checkSearchRateLimit, getClientIp, rateLimitedResponse } from '@/lib/rateLimit';
 import { validatePatchUpload, MAX_PATCH_FILE_SIZE_BYTES } from '@/lib/patchValidation';
 import { writePatchFile, readPatchFile, deletePatchFile, buildPatchDisplaySlug } from '@/lib/patchStorage';
-import { canManagePatchFile } from '@/lib/patchPermissions';
+import { canManagePatchFile, isPrivilegedPatchRole } from '@/lib/patchPermissions';
 import { arePatchUploadsDisabled, PATCH_UPLOADS_DISABLED_MESSAGE } from '@/lib/siteSettings';
-import type { PatchTypeValue } from '@/lib/patchTypes';
+import { type PatchTypeValue, patchTypeLabel } from '@/lib/patchTypes';
 
 // Multipart overhead for a single-file form (boundary strings, the one
 // field's headers) is at most a few hundred bytes in practice — 64KB of
@@ -166,9 +166,32 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   // just because a value is already sitting in the database.
   const computedSha1 = crypto.createHash('sha1').update(bytes).digest('hex'); // Node's digest('hex') is always lowercase
 
-  const validation = validatePatchUpload(bytes);
+  // The 'OTHER' escape hatch in validatePatchUpload (accepting a buffer
+  // that matches none of the six known patch signatures) is only ever
+  // offered to a privileged uploader — the real, load-bearing control
+  // against "declare it Other and upload a ROM," not the byte-level
+  // ROM/disc-image check validatePatchUpload also runs on that path
+  // (romDetection.ts), which is a second, automatic layer on top of this
+  // one, not a substitute for it. A non-privileged submitter can still
+  // set patchType to 'OTHER' on their own submission (a legitimate way to
+  // flag "my patch is in an uncommon format"), but their own upload
+  // attempt is validated as if nothing were declared at all — an
+  // undetectable file still gets the normal rejection, with a message
+  // pointing at needing a moderator instead of the normal "try declaring
+  // Other" suggestion, which would be actively misleading here since
+  // they already did that and it didn't help.
+  const isPrivileged = isPrivilegedPatchRole(session.user.role);
+  const otherDeclaredButNotPrivileged = submission.patchType === 'OTHER' && !isPrivileged;
+  const declaredTypeForValidation: PatchTypeValue | null = otherDeclaredButNotPrivileged
+    ? null
+    : (submission.patchType as PatchTypeValue | null);
+
+  const validation = validatePatchUpload(bytes, declaredTypeForValidation);
   if (!validation.ok) {
-    return NextResponse.json({ error: validation.reason }, { status: 422 });
+    const message = otherDeclaredButNotPrivileged
+      ? 'Only an admin or verifier can confirm and attach a patch declared as "Other" — please ask a moderator to review and upload this file.'
+      : validation.reason;
+    return NextResponse.json({ error: message }, { status: 422 });
   }
   const detectedType = validation.detectedType as PatchTypeValue;
 
@@ -182,7 +205,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     if (submission.patchType && detectedType !== submission.patchType) {
       return NextResponse.json(
         {
-          error: `This file looks like a ${detectedType} patch, but ${submission.patchType} was selected for this submission. Double-check the patch type, or leave it blank and this upload will set it.`,
+          error: `This file looks like a ${patchTypeLabel(detectedType)} patch, but ${patchTypeLabel(submission.patchType)} was selected for this submission. Double-check the patch type, or leave it blank and this upload will set it.`,
           // Structured alongside the message above so a client can offer a
           // direct "use the detected type" fix instead of only rendering
           // text (see PatchFileUpload.tsx). Purely additive — anything

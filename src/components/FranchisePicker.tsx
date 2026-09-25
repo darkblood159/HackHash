@@ -1,0 +1,272 @@
+'use client';
+
+// src/components/FranchisePicker.tsx
+//
+// Picks (or proposes) the franchise/series a hack belongs to — Super Mario,
+// The Legend of Zelda, Pokémon... Modeled on BaseRomPicker/FamilyPicker: an
+// existing one is chosen from a searchable list, and a new one is only
+// offered when nothing already listed matches. That ordering is the whole
+// point — it's how this avoids people creating three near-identical entries
+// for the same franchise.
+//
+// OPTIONAL by design (value: null is a normal, valid state — see the schema
+// comment on Submission.franchiseId), so unlike BaseRomPicker there's an
+// explicit "Remove" and the parent decides what null means.
+//
+// Search shows APPROVED and still-PENDING franchises (pending ones tagged),
+// plus near-misses ("similar") within a small edit distance — so someone
+// who types "Metriod" is shown "Metroid" instead of being offered a
+// brand-new franchise. See GET /api/franchises and searchFranchises() in
+// src/lib/franchise.ts.
+//
+// Built with the stale-response guard from the start (cancelled flag +
+// AbortController on the debounced search, epoch ref on the create call) —
+// the same shape FamilyPicker documents — so an out-of-order response can
+// never overwrite a newer one.
+
+import { useState, useEffect, useRef } from 'react';
+import { Search, Loader2, Plus, X } from 'lucide-react';
+
+export interface SelectedFranchise {
+  id: string;
+  name: string;
+  status: 'PENDING' | 'APPROVED';
+}
+
+interface FranchiseHit extends SelectedFranchise {
+  exact: boolean;
+  similar: boolean;
+}
+
+interface FranchisePickerProps {
+  value: SelectedFranchise | null;
+  onChange: (value: SelectedFranchise | null) => void;
+  // False turns this into a pure chooser (no "Add new" row) — used by the
+  // admin merge tool, where creating a franchise mid-merge makes no sense.
+  allowCreate?: boolean;
+  // Hides one franchise from results (the merge tool excludes the one being merged away).
+  excludeId?: string;
+  placeholder?: string;
+}
+
+export function FranchisePicker({ value, onChange, allowCreate = true, excludeId, placeholder }: FranchisePickerProps) {
+  const [changing, setChanging] = useState(false);
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const [hits, setHits] = useState<FranchiseHit[]>([]);
+  const [hasExactMatch, setHasExactMatch] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  // Bumped on cancel/unmount so a create call that resolves late is ignored.
+  const createEpochRef = useRef(0);
+
+  const searching = !value || changing;
+  const trimmed = query.trim();
+
+  // Close the dropdown on any click outside this component.
+  useEffect(() => {
+    function onDocMouseDown(e: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, []);
+
+  useEffect(() => () => { createEpochRef.current += 1; }, []);
+
+  // Debounced search. `cancelled` + abort make sure only the response for
+  // the CURRENT query/open state is ever applied.
+  useEffect(() => {
+    if (!open || !searching) {
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    let cancelled = false;
+    setLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ includePending: '1' });
+        if (trimmed) params.set('q', trimmed);
+        if (excludeId) params.set('excludeId', excludeId);
+        const res = await fetch(`/api/franchises?${params.toString()}`, { signal: controller.signal });
+        if (!res.ok) throw new Error('search failed');
+        const data = await res.json();
+        if (cancelled) return;
+        setHits(Array.isArray(data.franchises) ? data.franchises : []);
+        setHasExactMatch(!!data.exactMatch);
+      } catch {
+        // Aborted (a newer search superseded this one) or a network blip —
+        // either way there's nothing useful to show from this response.
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }, trimmed ? 200 : 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [trimmed, open, searching, excludeId]);
+
+  function pick(f: SelectedFranchise) {
+    createEpochRef.current += 1;
+    setNotice(null);
+    setError(null);
+    setQuery('');
+    setOpen(false);
+    setChanging(false);
+    onChange({ id: f.id, name: f.name, status: f.status });
+  }
+
+  async function createNew() {
+    if (!trimmed || creating) return;
+    const epoch = ++createEpochRef.current;
+    setCreating(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/franchises', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      const data = await res.json();
+      if (epoch !== createEpochRef.current) return;
+      if (!res.ok) {
+        setError(data.error ?? 'Could not add that franchise');
+        return;
+      }
+      // The server resolves against existing names, so this can hand back a
+      // franchise that already existed under slightly different spelling —
+      // say so, rather than silently showing a different name than typed.
+      setNotice(
+        data.isNew
+          ? null
+          : `"${data.name}" already exists, so it was used instead of creating a duplicate.`
+      );
+      setQuery('');
+      setOpen(false);
+      setChanging(false);
+      onChange({ id: data.franchiseId, name: data.name, status: data.status });
+    } catch {
+      if (epoch === createEpochRef.current) setError('Network error — please try again');
+    } finally {
+      if (epoch === createEpochRef.current) setCreating(false);
+    }
+  }
+
+  function cancelChange() {
+    createEpochRef.current += 1;
+    setChanging(false);
+    setQuery('');
+    setOpen(false);
+    setError(null);
+  }
+
+  // ── Selected state ──
+  if (!searching && value) {
+    return (
+      <div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-bg-base border border-border text-xs text-text-primary">
+            <span className="truncate">{value.name}</span>
+            {value.status === 'PENDING' && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-status-pending-bg text-status-pending">pending review</span>
+            )}
+          </span>
+          <button type="button" onClick={() => { setChanging(true); setNotice(null); }} className="text-xs text-phosphor hover:underline">
+            Change
+          </button>
+          <button
+            type="button"
+            onClick={() => { setNotice(null); onChange(null); }}
+            className="text-xs text-text-muted hover:text-status-rejected hover:underline"
+          >
+            Remove
+          </button>
+        </div>
+        {notice && <p className="mt-1 text-xs text-text-secondary">{notice}</p>}
+      </div>
+    );
+  }
+
+  // ── Search state ──
+  const showCreateRow = allowCreate && !!trimmed && !hasExactMatch && !loading;
+  const nearMatchCount = hits.length;
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <div className="relative">
+        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+        <input
+          type="text"
+          value={query}
+          disabled={creating}
+          onChange={(e) => { setQuery(e.target.value); setOpen(true); setError(null); }}
+          onFocus={() => setOpen(true)}
+          placeholder={placeholder ?? 'Search franchises (e.g. Super Mario, Zelda, Pokémon)…'}
+          className="w-full pl-7 pr-8 py-2 rounded-md bg-bg-surface border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50 transition-colors disabled:opacity-60"
+          autoComplete="off"
+        />
+        {(loading || creating) && (
+          <Loader2 size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 animate-spin text-text-muted" />
+        )}
+      </div>
+
+      {open && (
+        <div className="absolute z-10 mt-1 w-full max-h-64 overflow-y-auto rounded-md border border-border bg-bg-surface shadow-lg">
+          {hits.map((h) => (
+            <button
+              key={h.id}
+              type="button"
+              onClick={() => pick(h)}
+              className="w-full text-left px-3 py-2 text-xs hover:bg-phosphor/10 flex items-center justify-between gap-2"
+            >
+              <span className="text-text-primary truncate">{h.name}</span>
+              <span className="flex items-center gap-1.5 shrink-0">
+                {h.similar && <span className="text-[10px] text-text-muted italic">similar</span>}
+                {h.status === 'PENDING' && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-status-pending-bg text-status-pending">pending review</span>
+                )}
+              </span>
+            </button>
+          ))}
+
+          {!loading && hits.length === 0 && (
+            <p className="px-3 py-2 text-xs text-text-muted">
+              {trimmed ? 'No franchises match that.' : 'No franchises yet.'}
+            </p>
+          )}
+
+          {showCreateRow && (
+            <div className="border-t border-border">
+              {nearMatchCount > 0 && (
+                <p className="px-3 pt-2 text-[11px] text-status-pending">
+                  Something above may be the same franchise — pick it instead of adding a duplicate.
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={createNew}
+                className="w-full text-left px-3 py-2 text-xs hover:bg-phosphor/10 flex items-center gap-1.5 text-phosphor"
+              >
+                <Plus size={12} /> Add &ldquo;{trimmed}&rdquo; as a new franchise
+              </button>
+              <p className="px-3 pb-2 text-[11px] text-text-muted">New franchises are reviewed by an admin. Your hack can use it right away.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {error && <p className="mt-1 text-xs text-status-rejected">{error}</p>}
+      {changing && value && (
+        <button type="button" onClick={cancelChange} className="mt-1 inline-flex items-center gap-1 text-xs text-text-muted hover:underline">
+          <X size={10} /> Keep &ldquo;{value.name}&rdquo;
+        </button>
+      )}
+    </div>
+  );
+}

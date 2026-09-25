@@ -34,12 +34,24 @@
 // once real fixtures are available to verify against; flagged in the
 // handoff rather than shipped unverified.
 import type { PatchTypeValue } from './patchTypes';
+import { looksLikeKnownRom } from './romDetection';
 
-// First guess, not a researched number — cart-based IPS/BPS/UPS patches
-// are almost always well under 1MB; even a generous disc-based XDELTA/PPF
-// patch rarely needs more than a few tens of MB. Override with
-// PATCH_MAX_UPLOAD_BYTES if a real submission legitimately needs more.
-const DEFAULT_MAX_PATCH_FILE_SIZE_BYTES = 64 * 1024 * 1024; // 64MB
+// Raised twice now: 64MB -> 1GB after the first report that modern
+// disc-based total-conversion patches can legitimately run into the
+// hundreds of MB; then 1GB -> 2GB on a direct follow-up request. Kingdom
+// Hearts modding was the concrete example both times. PATCH_MAX_UPLOAD_BYTES
+// below still overrides this for anyone who needs more than 2GB too.
+//
+// IMPORTANT — raising this alone may not be enough: a reverse proxy in
+// front of this app (Nginx Proxy Manager, in this project's own documented
+// deployment — see DOCKER_PORTAINER_GUIDE.md) commonly has its own,
+// separate upload-size cap (`client_max_body_size`, defaulting to 1MB)
+// that rejects an oversized request BEFORE it ever reaches this
+// application-level check at all. If a large upload still fails after
+// raising PATCH_MAX_UPLOAD_BYTES, that proxy setting is the next thing to
+// check — this app has no way to detect or work around a limit enforced
+// in front of it.
+const DEFAULT_MAX_PATCH_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2GB
 export const MAX_PATCH_FILE_SIZE_BYTES = (() => {
   const raw = process.env.PATCH_MAX_UPLOAD_BYTES;
   const parsed = raw ? Number.parseInt(raw, 10) : NaN;
@@ -127,8 +139,20 @@ export interface PatchValidationResult {
  * whether this is a first upload or a privileged replace (section 2av),
  * a policy decision that doesn't belong inside "is this bytes blob a real
  * patch file."
+ *
+ * `declaredType` is the ONE exception to "doesn't compare against a
+ * declared type" above: when it's specifically 'OTHER', a buffer that
+ * doesn't match any of the six known signatures is accepted rather than
+ * rejected — see the OTHER branch below for why — UNLESS it matches a
+ * known ROM/disc-image signature instead (romDetection.ts), in which case
+ * it's rejected regardless of what was declared. Any other declared value
+ * (or none at all) leaves the original all-or-nothing behavior completely
+ * unchanged.
  */
-export function validatePatchUpload(bytes: Buffer): PatchValidationResult {
+export function validatePatchUpload(
+  bytes: Buffer,
+  declaredType?: PatchTypeValue | null
+): PatchValidationResult {
   if (bytes.length === 0) {
     return { ok: false, reason: 'Empty file.' };
   }
@@ -138,14 +162,49 @@ export function validatePatchUpload(bytes: Buffer): PatchValidationResult {
   }
 
   const detected = detectPatchFormat(bytes);
-  if (!detected) {
-    return {
-      ok: false,
-      reason:
-        "This doesn't look like a recognized patch file (IPS/BPS/UPS/PPF/XDELTA/APS). " +
-        'HackHash only stores patches, never full ROMs or ISOs — a base ROM or a finished ' +
-        "romhack can't be uploaded here.",
-    };
+  if (detected) {
+    // Always trust real byte detection over a stale/wrong declaration,
+    // 'OTHER' included — if someone declared OTHER but the bytes turn out
+    // to actually be a known format, that's exactly what route.ts's own
+    // existing declared-vs-detected mismatch check (a separate, later
+    // concern) is for; it already offers a one-click "use the detected
+    // type instead" fix, so nothing extra is needed here.
+    return { ok: true, detectedType: detected };
   }
-  return { ok: true, detectedType: detected };
+
+  // Nothing matched a known format's magic bytes. Ordinarily that's a
+  // hard rejection — the message below — but an explicit 'OTHER'
+  // declaration is exactly the escape hatch for a real patch tool this
+  // project doesn't (yet) have a byte signature for, so it's honored
+  // rather than treated the same as an unrecognized/garbage upload,
+  // SUBJECT TO the ROM/disc-image check right below — 'OTHER' is an
+  // escape hatch for an uncommon PATCH, not a way to bypass "no ROMs or
+  // ISOs" entirely. (Note: by the time bytes reach this function at all,
+  // route.ts has already decided whether this caller is even ALLOWED to
+  // use 'OTHER' — see isPrivilegedPatchRole, patchPermissions.ts. A
+  // non-privileged caller's declaredType is never 'OTHER' here even if
+  // they set that on the submission; that's the real, load-bearing
+  // control. This ROM check is the second, automatic layer on top of it,
+  // not a substitute for it.)
+  if (declaredType === 'OTHER') {
+    const romCheck = looksLikeKnownRom(bytes);
+    if (romCheck.looksLikeRom) {
+      return {
+        ok: false,
+        reason:
+          `This looks like ${romCheck.matchedFormat}, not a patch. HackHash only stores ` +
+          'patches, never full ROMs or ISOs — that\'s still true under "Other."',
+      };
+    }
+    return { ok: true, detectedType: 'OTHER' };
+  }
+
+  return {
+    ok: false,
+    reason:
+      "This doesn't look like a recognized patch file (IPS/BPS/UPS/PPF/XDELTA/APS). If this is " +
+      'a real patch in a format HackHash doesn\'t know how to detect yet, set the patch type to ' +
+      '"Other" first, then upload again. Otherwise: HackHash only stores patches, never full ' +
+      "ROMs or ISOs — a base ROM or a finished romhack can't be uploaded here.",
+  };
 }

@@ -36,6 +36,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
           updatedAt: true,
           gameMapping: true,
           tags: { select: { tag: { select: { slug: true } } } },
+          franchise: { select: { id: true, name: true, status: true } },
         },
       },
     },
@@ -52,6 +53,11 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     ? [...withMapping].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0]
     : null;
   const tagSource = [...family.submissions].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+  // Franchise: the most recently touched version that actually HAS one, so a
+  // single un-tagged newer version doesn't hide the franchise the rest share.
+  const franchiseSource = [...family.submissions]
+    .filter((s) => s.franchise)
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
 
   const m = mappingSource?.gameMapping;
 
@@ -63,6 +69,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     releaseDate: toISODateOnly(family.releaseDate),
     description: family.description,
     tags: tagSource?.tags.map((t) => t.tag.slug) ?? [],
+    franchise: franchiseSource?.franchise ?? null,
     gameDatabaseLinks: m
       ? {
           igdbId: m.igdbId ?? undefined,

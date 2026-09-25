@@ -1,0 +1,16 @@
+-- Purely additive — a new enum VALUE, no column/table change, no existing
+-- row touched. Lets a submission declare its patch as a real format this
+-- project doesn't have byte-signature detection for (an uncommon tool —
+-- Kingdom Hearts patches were the concrete example that prompted this)
+-- instead of being unable to represent it at all. See
+-- src/lib/patchValidation.ts for how an "OTHER" declaration changes what
+-- validatePatchUpload() accepts.
+--
+-- NOTE FOR WHOEVER ADDS THE NEXT PatchType VALUE: ALTER TYPE ... ADD VALUE
+-- cannot be used in the same transaction as anything that also USES the
+-- new value (a real Postgres restriction, not a Prisma one) — on Postgres
+-- 12+ (this project's baseline) it's fine to run inside a transaction as
+-- long as nothing else in this same migration file references 'OTHER'.
+-- Keep any future enum addition in its own standalone migration file for
+-- the same reason, same as this one.
+ALTER TYPE "PatchType" ADD VALUE 'OTHER';

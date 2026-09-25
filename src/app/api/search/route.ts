@@ -248,6 +248,92 @@ async function searchByBaseRom(
   });
 }
 
+// ─── Author search ───────────────────────────────────────────────────────────
+//
+// GET /api/search?q=...&by=author — finds hacks by AUTHOR NAME, across BOTH
+// approved entries and not-yet-approved submissions.
+//
+// This is its own mode rather than more matching bolted onto the default
+// one because the default search structurally can't do this: ApprovedEntry
+// has no author column at all (author lives on Submission), the "Database
+// entries" text search only ever looks at machineName, and "Submissions"
+// deliberately excludes APPROVED ones — so typing an author's name in the
+// default mode only ever found their UNAPPROVED hacks. Here the author
+// filter is applied to Submission.author directly for both result sets
+// (reaching approved entries through their submission relation).
+//
+// Matching: case-insensitive substring on the raw query, on its punctuation-
+// stripped form ("kaze-emanuar" finds "Kaze Emanuar"), and — for a
+// multi-word query — every word present in any order ("emanuar kaze").
+// No stemming/plural variants like the hack-name search uses: that's for
+// words in titles, and would just add noise to people's names.
+function buildAuthorFilter(q: string, words: string[], normalized: string): Record<string, any> {
+  const clauses: Record<string, any>[] = [{ author: { contains: q, mode: 'insensitive' } }];
+  if (normalized && normalized !== q.toLowerCase()) {
+    clauses.push({ author: { contains: normalized, mode: 'insensitive' } });
+  }
+  if (words.length >= 2) {
+    clauses.push({ AND: words.map((w) => ({ author: { contains: w, mode: 'insensitive' } })) });
+  }
+  return { OR: clauses };
+}
+
+async function searchByAuthor(
+  q: string,
+  normalized: string,
+  words: string[],
+  type: string,
+  platform: string | undefined
+) {
+  const authorFilter = buildAuthorFilter(q, words, normalized);
+  const platformFilter: Record<string, unknown> = platform ? { platform: platform as any } : {};
+
+  const [submissions, entries] = await Promise.all([
+    type !== 'entries'
+      ? prisma.submission.findMany({
+          // Approved ones are excluded here for the same reason as every
+          // other mode — they're shown under "Database entries" instead.
+          where: { ...authorFilter, deletedAt: null, status: { not: 'APPROVED' }, ...platformFilter },
+          select: {
+            id: true, hackName: true, version: true, author: true, platform: true,
+            status: true, verificationScore: true, sha1: true, crc32: true,
+            tags: { select: { tag: { select: { id: true, name: true, slug: true, description: true } } } },
+          },
+          orderBy: { verificationScore: 'desc' },
+          take: 50,
+        })
+      : [],
+    type !== 'submissions'
+      ? prisma.approvedEntry.findMany({
+          where: { submission: { ...authorFilter, deletedAt: null }, ...platformFilter },
+          select: {
+            id: true, submissionId: true, machineName: true, crc32: true, sha1: true, platform: true,
+            submission: { select: { hackName: true, author: true, releaseYear: true, releaseDate: true, hackFamilyId: true, hackFamily: { select: { name: true } } } },
+          },
+          // Explicit order so the 50-row cap below is a stable slice, not
+          // whatever order the database happens to return.
+          orderBy: { machineName: 'asc' },
+          take: 50,
+        })
+      : [],
+  ]);
+
+  // Best author-name match first (exact, then prefix, then contains) — same
+  // relevanceScore used everywhere else in this file, pointed at author.
+  (submissions as any[]).sort((a, b) => relevanceScore(b.author ?? '', normalized) - relevanceScore(a.author ?? '', normalized));
+  (entries as any[]).sort(
+    (a, b) => relevanceScore(b.submission?.author ?? '', normalized) - relevanceScore(a.submission?.author ?? '', normalized)
+  );
+
+  return NextResponse.json({
+    submissions,
+    entries: groupEntriesByFamily(entries as any[]),
+    query: q,
+    mode: 'text',
+    by: 'author',
+  });
+}
+
 export async function GET(req: NextRequest) {
   // No auth on this route — IP is the only identifier available. Checked
   // before anything else, including the empty-query short-circuit below,
@@ -261,7 +347,8 @@ export async function GET(req: NextRequest) {
   const q = searchParams.get('q')?.trim();
   const type = searchParams.get('type') ?? 'all';
   const platform = searchParams.get('platform') ?? undefined;
-  const by = searchParams.get('by') === 'baserom' ? 'baserom' : 'hack';
+  const byParam = searchParams.get('by');
+  const by = byParam === 'baserom' ? 'baserom' : byParam === 'author' ? 'author' : 'hack';
 
   if (!q || q.length < 2) {
     return NextResponse.json({ submissions: [], entries: [], users: [] });
@@ -280,6 +367,12 @@ export async function GET(req: NextRequest) {
 
   if (by === 'baserom') {
     return searchByBaseRom(q, normalized, words, hashCondition, type, platform);
+  }
+
+  // Before the hash branch below on purpose: an author name that happens to
+  // look like a hash (8 hex characters) is still a name here.
+  if (by === 'author') {
+    return searchByAuthor(q, normalized, words, type, platform);
   }
 
   if (hashCondition) {

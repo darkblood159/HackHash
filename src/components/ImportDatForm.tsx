@@ -23,6 +23,10 @@ interface ImportResult {
   skippedDuplicates: number;
   errors: Array<{ machineName: string; error: string }>;
   dismissalsRestored?: number;
+  // Detailed-export-only: how many imported entries had a physical patch
+  // file still sitting in storage and got reattached live, no re-upload
+  // needed — see admin/import/route.ts's patchReattachment logic.
+  patchesReattached: number;
   // AUG-28: the backend has always saved this level of detail to the
   // DatImport row's skippedLog — it just never made it into the response
   // this component receives, so there was previously no way to show it no
@@ -96,7 +100,7 @@ export function ImportDatForm() {
       batches.push(validEntries.slice(i, i + UPLOAD_BATCH_SIZE));
     }
 
-    const aggregate: ImportResult = { imported: 0, skippedDuplicates: 0, errors: [], duplicateDetails: [] };
+    const aggregate: ImportResult = { imported: 0, skippedDuplicates: 0, errors: [], duplicateDetails: [], patchesReattached: 0 };
     setProgress({ done: 0, total: batches.length });
     let importId: string | undefined;
 
@@ -127,6 +131,7 @@ export function ImportDatForm() {
           importId = data.importId ?? importId;
           aggregate.imported += data.imported ?? 0;
           aggregate.skippedDuplicates += data.skippedDuplicates ?? 0;
+          aggregate.patchesReattached += data.patchesReattached ?? 0;
           aggregate.errors.push(...(data.errors ?? []));
           aggregate.duplicateDetails.push(
             ...((data.skippedEntries ?? []) as Array<{ machineName: string; sha1: string; reason: string; existingSubmissionId?: string; existingHackName?: string; existingStatus?: string }>)
@@ -299,6 +304,11 @@ export function ImportDatForm() {
           {!!result.dismissalsRestored && (
             <p className="text-sm text-text-secondary">
               {result.dismissalsRestored} "not a duplicate" decision{result.dismissalsRestored === 1 ? '' : 's'} restored from the file.
+            </p>
+          )}
+          {result.patchesReattached > 0 && (
+            <p className="text-sm text-text-secondary">
+              {result.patchesReattached} patch file{result.patchesReattached === 1 ? '' : 's'} found still in storage and reattached — no re-upload needed.
             </p>
           )}
           {result.errors.length > 0 && (

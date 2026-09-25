@@ -80,6 +80,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
       approvedEntry: true,
       gameMapping: true,
       baseRom: true,
+      franchise: { select: { id: true, name: true, status: true } },
       hackFamily: { select: { id: true, name: true } },
       alternateFormats: {
         orderBy: { createdAt: 'asc' },
@@ -202,7 +203,17 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
           </div>
           {(submission.author || submission.releaseYear || submission.releaseDate) ? (
             <p className="text-text-secondary mt-1">
-              {submission.author && <>by {submission.author}</>}
+              {submission.author && (
+                <>
+                  by{' '}
+                  {/* Links to every hack by this exact author name (case-insensitive) —
+                      /submissions rather than /entries so it includes hacks that
+                      aren't approved yet, this one possibly among them. */}
+                  <Link href={`/submissions?author=${encodeURIComponent(submission.author)}`} className="hover:text-phosphor hover:underline">
+                    {submission.author}
+                  </Link>
+                </>
+              )}
               {submission.author && (submission.releaseYear || submission.releaseDate) && ' · '}
               <ReleaseDate releaseDate={toISODateOnly(submission.releaseDate)} releaseYear={submission.releaseYear} />
             </p>
@@ -211,6 +222,16 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
           )}
           <div className="flex items-center gap-1.5 mt-3 flex-wrap">
             <PlatformBadge platform={submission.platform} />
+            {submission.franchise && (
+              <Link
+                href={`/submissions?franchise=${submission.franchise.id}`}
+                title={submission.franchise.status === 'PENDING' ? 'Franchise pending admin review — see other hacks in it' : 'See other hacks in this franchise'}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border bg-bg-surface text-xs text-text-secondary hover:text-phosphor hover:border-phosphor/40 transition-colors"
+              >
+                {submission.franchise.name}
+                {submission.franchise.status === 'PENDING' && <span className="text-[10px] text-status-pending">(pending)</span>}
+              </Link>
+            )}
             {submission.tags.map(({ tag }) => (
               <TagBadge
                 key={tag.id}
@@ -533,6 +554,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
             currentMapping={submission.gameMapping as any}
             currentFamily={submission.hackFamily}
             currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
+            currentFranchise={submission.franchise}
             currentTags={submission.tags.map((t: any) => t.tag.slug)}
             currentTranslationLanguages={submission.translationLanguages}
             initialRequests={submission.changeRequests as any}
@@ -616,6 +638,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               tags={submission.tags.map((t: any) => t.tag.slug)}
               currentFamily={submission.hackFamily}
               currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
+              currentFranchise={submission.franchise}
               hasOtherVersions={siblingVersions.length > 0}
               fileInfo={{
                 filename: submission.filename,
