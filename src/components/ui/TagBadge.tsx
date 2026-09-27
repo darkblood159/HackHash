@@ -15,7 +15,7 @@ interface TagBadgeProps {
   description?: string | null;
 }
 
-export function TagBadge({ name, slug, href, size = 'sm', active, description }: TagBadgeProps) {
+export function TagBadge({ name, href, size = 'sm', active, description }: TagBadgeProps) {
   const className = clsx(
     'inline-flex items-center rounded-full border font-medium whitespace-nowrap transition-colors',
     size === 'sm' ? 'px-2 py-0.5 text-[10px]' : 'px-2.5 py-1 text-xs',

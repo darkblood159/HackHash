@@ -2,7 +2,7 @@
 import { prisma } from './prisma';
 import { PLATFORM_LABELS } from '@/types';
 import { isMappingFieldKey, stripMappingValue } from './mappingFields';
-import { getDismissedPairsForExport, toISODateOnly, type DismissedPairExport } from './hackFamily';
+import { toISODateOnly, type DismissedPairExport } from './hackFamily';
 
 interface DATHeader {
   name: string;
@@ -567,17 +567,3 @@ export function generateDATCSV(machines: DATMachine[]): string {
   return [headers.join(','), ...rows].join('\n');
 }
 
-// ─── Single entry XML snippet ─────────────────────────────────────────────────
-
-export function generateEntryXML(machine: DATMachine): string {
-  return `<machine name="${escapeXml(machine.machineName)}">
-    <description>${escapeXml(machine.description)}</description>
-    <rom
-        name="${escapeXml(machine.romName)}"
-        size="${machine.fileSize}"
-        crc="${machine.crc32}"
-        md5="${machine.md5}"
-        sha1="${machine.sha1}"
-    />
-</machine>`;
-}

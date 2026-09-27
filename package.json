@@ -50,5 +50,8 @@
     "tailwindcss": "^3.4.4",
     "tsx": "^4.15.0",
     "typescript": "^5.4.5"
+  },
+  "overrides": {
+    "@auth/core": "0.41.3"
   }
 }

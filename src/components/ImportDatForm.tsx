@@ -4,7 +4,7 @@
 import React, { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from './ui/Button';
-import { Upload, FileWarning, CheckCircle2, AlertTriangle, Loader2, Sparkles } from 'lucide-react';
+import { Upload, FileWarning, CheckCircle2, AlertTriangle, Sparkles } from 'lucide-react';
 import { PLATFORMS, PLATFORM_LABELS } from '@/types';
 import { parseDatFile, validateEntries, extractDismissedDuplicates, type ValidatedEntry } from '@/lib/dat-parser';
 

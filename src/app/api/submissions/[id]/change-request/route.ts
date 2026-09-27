@@ -6,7 +6,7 @@ import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
 import { PLATFORMS } from '@/types';
 import { NULLABLE_FIELD_LIMITS, isNullableLimitField } from '@/lib/fieldLimits';
-import { MAPPING_FIELD_KEYS, stripMappingValues, isMappingFieldKey } from '@/lib/mappingFields';
+import { MAPPING_FIELD_KEYS, stripMappingValues } from '@/lib/mappingFields';
 import { SHARED_FIELD_KEYS } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
 import { validateFranchiseAssignment, FranchiseAssignError } from '@/lib/franchise';

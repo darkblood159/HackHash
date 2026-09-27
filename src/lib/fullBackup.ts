@@ -18,7 +18,8 @@
 // (including who submitted each one and who uploaded its patch), verification
 // votes, trust-score history, comments, tags, hack families + their
 // dismissed-duplicate decisions, base ROMs, alternate formats, duplicate
-// reports, screenshots, DAT import history, and site settings.
+// reports, screenshots, DAT import history, pending/reviewed change
+// requests, and site settings.
 //
 // WHAT'S DELIBERATELY EXCLUDED, AND WHY:
 //   - Session, VerificationToken: short-lived NextAuth auth-state rows.
@@ -32,10 +33,27 @@
 //     getUserByAccount, used by src/lib/auth.ts). Deliberately never written
 //     into a downloadable backup file, which will realistically end up
 //     stored less carefully than the live database itself.
-//   - AuditLog, ChangeRequest, SyncJob: operational/history logs. Not asked
-//     for, not core to "the database" in the sense meant here (who
-//     submitted what, who verified what, who has what role/trust). Would be
-//     straightforward to add later — flagged, not built.
+//   - AuditLog, SyncJob: operational/history logs. Not asked for, not core
+//     to "the database" in the sense meant here (who submitted what, who
+//     verified what, who has what role/trust). AuditLog.userId/submissionId
+//     are both ON DELETE SET NULL, so leaving it out of WIPE/RESTORE_ORDER
+//     is safe — a restore just nulls those two columns on any log rows that
+//     pointed at a wiped user/submission, it doesn't block the wipe.
+//   - ChangeRequest was meant to be excluded on the same reasoning, but
+//     ISN'T anymore, and can't safely be: unlike AuditLog, both
+//     ChangeRequest.submissionId and .requestedById are ON DELETE RESTRICT
+//     (see prisma/migrations/20260622020707_expand_platform_enum). Excluding
+//     it from WIPE_ORDER doesn't skip touching those rows, it just means
+//     Postgres refuses the Submission/User deleteMany the moment any live
+//     ChangeRequest still points at the row being deleted — exactly the
+//     "violates RESTRICT setting of foreign key constraint
+//     ChangeRequest_submissionId_fkey" error this caused in practice.
+//     Harmless against a truly empty DB (a real from-scratch disaster has no
+//     surviving ChangeRequest rows to conflict with either), but a restore
+//     run against a live/populated database — arguably the more common
+//     "roll back to last night's backup" use of this feature — hit it
+//     immediately. Now included for real, in RESTORE_ORDER/WIPE_ORDER like
+//     every other table.
 //
 // PATCH FILES THEMSELVES: never touched by this file. Patch storage is a
 // bind-mounted host directory, independent of the database by design (see
@@ -133,6 +151,7 @@ export async function generateFullBackup(
     franchises,
     datImports,
     submissions,
+    changeRequests,
     approvedEntries,
     verifications,
     trustEvents,
@@ -153,6 +172,7 @@ export async function generateFullBackup(
     prisma.franchise.findMany(),
     prisma.datImport.findMany(),
     prisma.submission.findMany(),
+    prisma.changeRequest.findMany(),
     prisma.approvedEntry.findMany(),
     prisma.verification.findMany(),
     prisma.trustEvent.findMany(),
@@ -189,6 +209,7 @@ export async function generateFullBackup(
     franchises: franchises,
     datImports: datImports,
     submissions: submissions.map((s) => ({ ...s, fileSize: s.fileSize.toString() })),
+    changeRequests: changeRequests,
     approvedEntries: approvedEntries.map((e) => ({ ...e, fileSize: e.fileSize.toString() })),
     verifications: verifications,
     trustEvents: trustEvents,
@@ -237,6 +258,13 @@ const RESTORE_ORDER = [
   'franchises',
   'datImports',
   'submissions',
+  // After 'submissions' and 'users' — ChangeRequest.submissionId and
+  // .requestedById are both foreign keys to those, and (unlike most FKs in
+  // this app) both ON DELETE RESTRICT rather than SET NULL/CASCADE, so this
+  // table's position here is load-bearing, not just tidy grouping: get it
+  // wrong and WIPE_ORDER (this list, reversed) tries to delete a Submission
+  // or User a live ChangeRequest still points at. See the file header.
+  'changeRequests',
   'approvedEntries',
   'verifications',
   'trustEvents',
@@ -257,7 +285,15 @@ const WIPE_ORDER = [...RESTORE_ORDER].reverse();
 // (validatePayload below) instead of making every older backup unrestorable
 // the moment this table exists. A key that IS present must still be a real
 // array with a matching count, like any other table.
-const OPTIONAL_TABLES = ['franchises'] as const;
+//
+// 'changeRequests' is here for the same reason, not because the table is
+// new: a backup taken with the earlier version of this exporter (before
+// ChangeRequest was wired into RESTORE_ORDER — see file header) has no
+// "changeRequests" key either. Restoring one of those files still restores
+// everything it does have; any change requests live in the database at
+// restore time are wiped along with it, same trade-off an old
+// franchise-less backup already makes for franchises.
+const OPTIONAL_TABLES = ['franchises', 'changeRequests'] as const;
 
 // tx.model.deleteMany({}) for a table name that isn't a Prisma delegate
 // (there isn't one — this list is hand-matched 1:1 against RESTORE_ORDER
@@ -273,6 +309,7 @@ const MODEL_FOR_KEY: Record<string, string> = {
   franchises: 'franchise',
   datImports: 'datImport',
   submissions: 'submission',
+  changeRequests: 'changeRequest',
   approvedEntries: 'approvedEntry',
   verifications: 'verification',
   trustEvents: 'trustEvent',
@@ -348,6 +385,29 @@ const ROW_MAPPERS: Record<string, (r: any) => any> = {
     createdAt: parseDateReq(s.createdAt),
     updatedAt: parseDateReq(s.updatedAt),
     deletedAt: parseDate(s.deletedAt),
+  }),
+  // Json fields (changes/proposedTags/proposedTranslationLanguages/
+  // proposedFamily/proposedBaseRom/proposedFranchise) need no date/BigInt
+  // handling of their own — they only ever hold plain strings/booleans/null
+  // (see the schema comments on each), which JSON.stringify/parse already
+  // round-trip correctly on their own.
+  changeRequests: (c) => ({
+    id: c.id,
+    submissionId: c.submissionId,
+    requestedById: c.requestedById,
+    changes: c.changes,
+    applyToAllVersions: c.applyToAllVersions ?? true,
+    proposedTags: c.proposedTags ?? null,
+    proposedTranslationLanguages: c.proposedTranslationLanguages ?? null,
+    proposedFamily: c.proposedFamily ?? null,
+    proposedBaseRom: c.proposedBaseRom ?? null,
+    proposedFranchise: c.proposedFranchise ?? null,
+    reason: c.reason ?? null,
+    status: c.status,
+    reviewedById: c.reviewedById ?? null,
+    reviewedAt: parseDate(c.reviewedAt),
+    reviewNote: c.reviewNote ?? null,
+    createdAt: parseDateReq(c.createdAt),
   }),
   approvedEntries: (e) => ({
     ...e,

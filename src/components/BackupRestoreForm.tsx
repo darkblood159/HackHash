@@ -36,6 +36,7 @@ const TABLE_LABELS: Record<string, string> = {
   approvedEntries: 'approved entries',
   baseRoms: 'base ROMs',
   franchises: 'franchises',
+  changeRequests: 'change requests',
 };
 
 export function BackupRestoreForm() {

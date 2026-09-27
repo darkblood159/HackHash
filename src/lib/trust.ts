@@ -153,24 +153,3 @@ export async function updateSubmissionStatus(submissionId: string, score: number
   }
 }
 
-// ─── Post-approval: reconcile verifier trust ──────────────────────────────────
-
-export async function reconcileVerifierTrust(
-  submissionId: string,
-  approved: boolean
-) {
-  const verifications = await prisma.verification.findMany({
-    where: { submissionId },
-    select: { userId: true, matches: true },
-  });
-
-  for (const v of verifications) {
-    const correct = approved ? v.matches : !v.matches;
-    await applyTrustEvent({
-      userId: v.userId,
-      eventType: correct ? 'CORRECT_VERIFICATION' : 'FALSE_VERIFICATION',
-      reason: `Verification outcome reconciled for submission ${submissionId}`,
-      relatedId: submissionId,
-    });
-  }
-}

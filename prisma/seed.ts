@@ -1,5 +1,5 @@
 // prisma/seed.ts
-import { PrismaClient, UserRole, TrustEventType } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import { ALL_TAGS } from '@/lib/tags';
 
 const prisma = new PrismaClient();
