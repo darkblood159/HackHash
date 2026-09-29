@@ -11,12 +11,19 @@ import { LANGUAGE_CODES } from '@/lib/languages';
 import { resolveOrCreateFamily, propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
 import { checkSubmissionsRateLimit, rateLimitedResponse } from '@/lib/rateLimit';
 import { validateFranchiseAssignment, propagateFranchise, FranchiseAssignError } from '@/lib/franchise';
+import { validateAuthorAssignment, propagateAuthor, AuthorAssignError, type AuthorSummary } from '@/lib/author';
 
 const createSubmissionSchema = z.object({
   hackName: z.string().min(1).max(200),
   version: z.string().min(1).max(50),
   description: z.string().max(5000).optional(),
   versionChangelog: z.string().max(3000).optional(),
+  // Free-text fallback, used only when authorId (below) isn't sent —
+  // author linking through the shared Author list is the primary path
+  // going forward (see SubmitForm's AuthorPicker), but this stays accepted
+  // for anything hitting this API directly without going through that
+  // picker. Ignored (overridden server-side) whenever authorId IS present
+  // — see the authorId handling below for why.
   author: z.string().min(1).max(200).optional(),
   releaseYear: z.number().int().min(1990).max(new Date().getFullYear() + 1).optional(),
   // Full release date, when actually known — 'YYYY-MM-DD', same bounds as
@@ -51,6 +58,14 @@ const createSubmissionSchema = z.object({
   // proposing a brand-new one happens via POST /api/franchises before the
   // form gets here, same as base roms via POST /api/base-roms.
   franchiseId: z.string().min(1).optional(),
+  // OPTIONAL, same shape as franchiseId — references an EXISTING Author row
+  // (see src/lib/author.ts); proposing a brand-new one happens via POST
+  // /api/authors before the form gets here. When present, this WINS over
+  // the plain `author` string above — the resolved Author row's current
+  // name becomes the submission's `author` value, never whatever string
+  // happened to also be sent (see Submission.authorId's schema comment for
+  // why `author` has to stay an accurate cache).
+  authorId: z.string().min(1).optional(),
   notes: z.string().max(5000).optional(),
   releasePageUrl: z.string().url().optional().or(z.literal('')),
   githubUrl: z.string().url().optional().or(z.literal('')),
@@ -204,6 +219,24 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // authorId: same courtesy-validate-before-writing-anywhere treatment as
+  // franchiseId above. When present, authorTarget.name below is what
+  // actually gets written to the submission's `author` column — the
+  // resolved Author row's CURRENT name, never data.author, even if a
+  // caller also sent one (see this field's own schema comment).
+  let authorTarget: AuthorSummary | null = null;
+  if (data.authorId) {
+    try {
+      authorTarget = await validateAuthorAssignment(prisma, data.authorId);
+    } catch (err) {
+      if (err instanceof AuthorAssignError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
+  }
+  const resolvedAuthor = authorTarget ? authorTarget.name : (data.author ?? null);
+
   // Normalize hashes to lowercase
   const sha1 = data.sha1.toLowerCase();
   const md5 = data.md5.toLowerCase();
@@ -238,7 +271,8 @@ export async function POST(req: NextRequest) {
       // erroring, since this is a soft "nice to have" field, not something
       // worth blocking a whole submission over.
       translationLanguages: (data.translationLanguages ?? []).filter((c) => LANGUAGE_CODES.includes(c)),
-      author: data.author,
+      author: resolvedAuthor,
+      authorId: authorTarget?.id ?? null,
       releaseYear: release.releaseYear,
       releaseDate: release.releaseDate,
       platform: data.platform,
@@ -300,7 +334,7 @@ export async function POST(req: NextRequest) {
   const { familyId, isNewFamily } = await resolveOrCreateFamily(prisma, {
     name: data.hackName,
     platform: data.platform,
-    author: data.author ?? null,
+    author: resolvedAuthor,
     releaseYear: release.releaseYear,
     releaseDate: release.releaseDate,
     description: data.description ?? null,
@@ -312,7 +346,7 @@ export async function POST(req: NextRequest) {
     try {
       await prisma.$transaction(async (tx) => {
         await propagateSharedFields(tx, familyId, submission.id, {
-          author: data.author ?? null,
+          author: resolvedAuthor,
           releaseYear: release.releaseYear,
           releaseDate: release.releaseDate,
           description: data.description ?? null,
@@ -326,6 +360,16 @@ export async function POST(req: NextRequest) {
         // wipes a franchise the other versions already have.
         if (data.franchiseId) {
           await propagateFranchise(tx, familyId, submission.id, data.franchiseId);
+        }
+        // Same "only when actually chosen" reasoning as franchiseId above —
+        // and, unlike franchiseId, this also keeps the siblings' `author`
+        // string in sync (see propagateAuthor's own comment). The generic
+        // propagateSharedFields call just above already pushed the same
+        // resolved name out as a plain string; this additionally links
+        // each sibling's authorId so they don't just show the right name
+        // but are actually linked to the same governed Author row.
+        if (authorTarget) {
+          await propagateAuthor(tx, familyId, submission.id, authorTarget);
         }
       });
     } catch (err: any) {

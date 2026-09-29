@@ -9,6 +9,7 @@ import { MappingsSection } from './MappingsSection';
 import { HackNameAutocomplete, type HackFamilySuggestion } from './HackNameAutocomplete';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
 import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
+import { AuthorPicker, type SelectedAuthor } from './AuthorPicker';
 import { Button } from './ui/Button';
 import { AlertTriangle, CheckCircle2, ChevronLeft, FileWarning, Sparkles } from 'lucide-react';
 import type { ROMFileInfo } from '@/types';
@@ -27,7 +28,6 @@ interface FormState {
   version: string;
   description: string;
   versionChangelog: string;
-  author: string;
   releaseYear: string;
   releaseDate: string; // 'YYYY-MM-DD' from <input type="date">, mutually exclusive with releaseYear via the "I only know the year" toggle
   platform: string;
@@ -55,7 +55,7 @@ interface FormState {
 }
 
 const initialForm: FormState = {
-  hackName: '', version: '', description: '', versionChangelog: '', author: '', releaseYear: '', releaseDate: '',
+  hackName: '', version: '', description: '', versionChangelog: '', releaseYear: '', releaseDate: '',
   platform: '', sourceUrl: '', patchType: '', patchFilename: '', patchSha1: '',
   notes: '', releasePageUrl: '', githubUrl: '', tags: [], translationLanguages: [],
   igdbId: '', theGamesDBId: '', launchboxId: '', steamGridDBId: '', retroAchievementsId: '',
@@ -100,6 +100,20 @@ export function SubmitForm() {
   // one?" against the CURRENT value, not the one captured when they started.
   const [franchise, setFranchise] = useState<SelectedFranchise | null>(null);
   const franchiseRef = useRef<SelectedFranchise | null>(null);
+  // Optional, same shape and same stale-closure-safe ref mirror as franchise
+  // above. Author is picked from the shared Author list (AuthorPicker), not
+  // typed as free text.
+  const [author, setAuthor] = useState<SelectedAuthor | null>(null);
+  const authorRef = useRef<SelectedAuthor | null>(null);
+  // A plain author NAME carried over from an earlier version whose author was
+  // never linked to an Author row (every hack submitted before the Author
+  // list existed). Without this, adding a new version of such a hack would
+  // prefill an empty picker, submit with no author at all, and — since a
+  // new version's author is pushed out to every other version by default —
+  // blank the author on all the existing ones. Sent as the API's plain
+  // `author` fallback ONLY while nothing has been picked; picking or adding
+  // a real author (or dismissing this) replaces it.
+  const [legacyAuthor, setLegacyAuthor] = useState<string | null>(null);
   const [step, setStep] = useState<1 | 2>(1);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -188,6 +202,34 @@ export function SubmitForm() {
     });
   };
 
+  // Same single-funnel idea as applyFranchise, for the author picker.
+  const applyAuthor = (next: SelectedAuthor | null, auto = false) => {
+    authorRef.current = next;
+    setAuthor(next);
+    // A real pick (or an explicit removal) always supersedes a carried-over
+    // plain-text name — the two are never both live.
+    setLegacyAuthor(null);
+    setAutoFilledFields((prev) => {
+      if (auto === prev.has('author')) return prev;
+      const updated = new Set(prev);
+      if (auto) updated.add('author'); else updated.delete('author');
+      return updated;
+    });
+  };
+
+  // For a prefill that only has a plain name (see legacyAuthor above), or
+  // null when the person dismisses it.
+  const applyLegacyAuthor = (name: string | null, auto = false) => {
+    setLegacyAuthor(name);
+    setAutoFilledFields((prev) => {
+      const want = auto && !!name;
+      if (want === prev.has('author')) return prev;
+      const updated = new Set(prev);
+      if (want) updated.add('author'); else updated.delete('author');
+      return updated;
+    });
+  };
+
   const applyFamilyPrefill = async (familyId: string) => {
     try {
       const res = await fetch(`/api/entries/hack-family/${familyId}`);
@@ -197,7 +239,6 @@ export function SubmitForm() {
       setForm((f) => {
         const next = { ...f };
         if (!f.platform && data.platform) { next.platform = data.platform; filled.add('platform'); }
-        if (!f.author && data.author) { next.author = data.author; filled.add('author'); }
         if (!skipDatePrefillRef.current && !f.releaseDate && !f.releaseYear) {
           // Prefer the family's full date when it has one; fall back to
           // year-only. Either way this also sets the toggle so the right
@@ -222,6 +263,12 @@ export function SubmitForm() {
       if (filled.size > 0) setAutoFilledFields((prev) => new Set([...Array.from(prev), ...Array.from(filled)]));
       // Only when nothing's been picked yet — never clobbers a choice.
       if (data.franchise && !franchiseRef.current) applyFranchise(data.franchise, true);
+      // Same never-clobber rule. Prefer a linked Author; fall back to the
+      // plain name for a hack whose author was never linked (see legacyAuthor).
+      if (!authorRef.current) {
+        if (data.author) applyAuthor(data.author, true);
+        else if (data.authorName) applyLegacyAuthor(data.authorName, true);
+      }
     } catch {
       // Non-fatal — same convenience-not-gate philosophy as the rest of this.
     }
@@ -324,7 +371,6 @@ export function SubmitForm() {
           };
           maybeFill('hackName', data.hackName);
           maybeFill('platform', data.platform);
-          maybeFill('author', data.author);
           maybeFill('description', data.description);
           maybeFill('sourceUrl', data.sourceUrl);
           maybeFill('notes', data.notes);
@@ -351,6 +397,10 @@ export function SubmitForm() {
         if (filled.size > 0) setAutoFilledFields((prev) => new Set([...Array.from(prev), ...Array.from(filled)]));
         if (data.baseRom) setBaseRom(data.baseRom);
         if (data.franchise && !franchiseRef.current) applyFranchise(data.franchise, true);
+        if (!authorRef.current) {
+          if (data.author) applyAuthor(data.author, true);
+          else if (data.authorName) applyLegacyAuthor(data.authorName, true);
+        }
 
         // Surfaces the "this will be added as a new version of X" banner
         // (with this flow's own wording, see isAddingNewVersion below)
@@ -465,10 +515,10 @@ export function SubmitForm() {
       maybeSet('hackName', form.hackName);
       maybeSet('version', form.version);
       maybeSet('versionChangelog', form.versionChangelog);
-      maybeSet('author', form.author);
       maybeSet('releaseDate', form.releaseDate);
       maybeSet('releaseYear', form.releaseYear, true);
       maybeSet('description', form.description);
+      if (!author && legacyAuthor) maybeSet('author', legacyAuthor);
       maybeSet('sourceUrl', form.sourceUrl);
       maybeSet('platform', form.platform);
       maybeSet('notes', form.notes);
@@ -499,6 +549,7 @@ export function SubmitForm() {
             ...(baseRom ? { proposedBaseRom: { id: baseRom.id, name: baseRom.name } } : {}),
             // Same "only if it actually has a value" rule as baseRom above.
             ...(franchise ? { proposedFranchise: { id: franchise.id, name: franchise.name } } : {}),
+            ...(author ? { proposedAuthor: { id: author.id, name: author.name } } : {}),
             applyToAllVersions,
             reason: 'Submitted while trying to upload a file that matched an existing entry\'s hash — proposed information for the existing entry instead of a new submission.',
           }),
@@ -529,7 +580,9 @@ export function SubmitForm() {
         body: JSON.stringify({
           hackName: form.hackName,
           version: form.version,
-          author: form.author || undefined,
+          authorId: author?.id,
+          // Only while nothing was picked — see legacyAuthor. The server ignores this whenever authorId is present.
+          author: !author && legacyAuthor ? legacyAuthor : undefined,
           releaseYear: form.releaseYear ? parseInt(form.releaseYear, 10) : undefined,
           releaseDate: form.releaseDate || undefined,
           platform: form.platform,
@@ -823,8 +876,17 @@ export function SubmitForm() {
                 </label>
               </div>
             </Field>
-            <Field label="Author" hint="Leave blank if unknown" autoFilled={autoFilledFields.has('author')}>
-              <input className={inputClass} value={form.author} onChange={(e) => update('author', e.target.value)} placeholder="RomHacker99" />
+            <Field label="Author" hint="Pick from the list, or add a new one. Leave blank if unknown" autoFilled={autoFilledFields.has('author')}>
+              <AuthorPicker value={author} onChange={(next) => applyAuthor(next)} />
+              {!author && legacyAuthor && (
+                <p className="mt-1.5 text-xs text-text-secondary">
+                  Carried over from an earlier version: &ldquo;{legacyAuthor}&rdquo; (not on the author list yet).
+                  Search above to link it, or{' '}
+                  <button type="button" onClick={() => applyLegacyAuthor(null)} className="text-phosphor hover:underline">
+                    leave it blank
+                  </button>.
+                </p>
+              )}
             </Field>
             <Field label="Release date" hint="Leave blank if unknown" autoFilled={autoFilledFields.has('releaseYear') || autoFilledFields.has('releaseDate')}>
               <div className="space-y-1.5">

@@ -12,6 +12,7 @@ import { LANGUAGE_CODES } from '@/lib/languages';
 import { propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
 import { validateFranchiseAssignment, propagateFranchise, FranchiseAssignError } from '@/lib/franchise';
+import { validateAuthorAssignment, propagateAuthor, AuthorAssignError, type AuthorSummary } from '@/lib/author';
 import { resolveMachineName, triggerHasheousPushForSubmission } from '@/lib/approval';
 
 // ─── GET /api/submissions/:id ─────────────────────────────────────────────────
@@ -162,7 +163,7 @@ export async function PATCH(
 
   const body = await req.json();
   const allowedFields = ['hackName', 'version', 'description', 'versionChangelog', 'author', 'releaseYear', 'releaseDate', 'platform',
-    'sourceUrl', 'notes', 'releasePageUrl', 'githubUrl', 'patchType', 'patchFilename', 'patchSha1', 'baseRomId', 'franchiseId'];
+    'sourceUrl', 'notes', 'releasePageUrl', 'githubUrl', 'patchType', 'patchFilename', 'patchSha1', 'baseRomId', 'franchiseId', 'authorId'];
 
   const updateData: Record<string, unknown> = {};
   for (const field of allowedFields) {
@@ -224,6 +225,59 @@ export async function PATCH(
     // only being visible in the response body via devtools.
     console.error('PATCH /api/submissions/[id] validation failed:', JSON.stringify(fieldCheck.error.flatten()));
     return NextResponse.json({ error: 'Validation failed', details: fieldCheck.error.flatten() }, { status: 422 });
+  }
+
+  // authorId: OPTIONAL, same courtesy-validate-before-writing treatment as
+  // franchiseId below (checked here rather than down there, specifically so
+  // the resolved name below is in place BEFORE sharedChanges is built a few
+  // lines down — see that block's own use of updateData.author). null is a
+  // legitimate value — "remove the linked author" — and only a non-null id
+  // needs checking against the live table.
+  //
+  // Unlike franchiseId, a resolved authorId also overwrites updateData.author
+  // itself: `author` is a denormalized CACHE of whichever Author row this is
+  // linked to (see that field's schema comment), so it has to reflect the
+  // Author's actual current name, never a client-sent string that might not
+  // agree — even if this same request also happened to include a plain
+  // `author` value (allowedFields still accepts one, for anything hitting
+  // this API without going through AuthorPicker; authorId simply wins when
+  // both are present).
+  let authorTarget: AuthorSummary | null = null;
+  let authorChangeDetail: { from: string | null; to: string | null; toName: string | null } | null = null;
+  if ('authorId' in updateData) {
+    const nextAuthorId = updateData.authorId;
+    if (nextAuthorId !== null && (typeof nextAuthorId !== 'string' || nextAuthorId === '')) {
+      return NextResponse.json({ error: 'Invalid author' }, { status: 400 });
+    }
+    if (nextAuthorId) {
+      try {
+        authorTarget = await validateAuthorAssignment(prisma, nextAuthorId as string);
+      } catch (err) {
+        if (err instanceof AuthorAssignError) {
+          return NextResponse.json({ error: err.message }, { status: err.status });
+        }
+        throw err;
+      }
+    }
+    authorChangeDetail = { from: submission.authorId ?? null, to: (nextAuthorId as string | null), toName: authorTarget?.name ?? null };
+    updateData.author = authorTarget?.name ?? null;
+  }
+
+  // The reverse case: a plain-text `author` edit with NO authorId alongside
+  // it, on a submission that IS linked to an Author row. AuthorPicker never
+  // sends this (it always sends authorId), but this API still accepts a
+  // plain `author` for direct callers and any older page still open from
+  // before the picker shipped. Left alone, the text would silently stop
+  // matching the linked row — and a later rename or merge of that Author
+  // would then overwrite the text someone deliberately typed. A different
+  // name means the link no longer holds, so unlink it (author text is
+  // untouched; it's exactly the legacy "plain text, no link" state). Must
+  // run AFTER the authorId block above, which would otherwise see the
+  // authorId set here and overwrite the typed text with null.
+  let unlinkAuthorOnTextEdit = false;
+  if ('author' in updateData && !('authorId' in updateData) && submission.authorId && updateData.author !== submission.author) {
+    updateData.authorId = null;
+    unlinkAuthorOnTextEdit = true;
   }
 
   // If this submission belongs to a HackFamily (another version of the same
@@ -356,6 +410,27 @@ export async function PATCH(
         if (franchiseChangeDetail) {
           await propagateFranchise(tx, submission.hackFamilyId, params.id, franchiseChangeDetail.to);
         }
+        // authorId is a relation column, which propagateSharedFields above
+        // (plain string columns only) never touches — so without this the
+        // siblings would get the right author NAME but not actually be
+        // linked to the same Author row. propagateAuthor also rewrites
+        // their `author` string to the same value; redundant with the
+        // propagateSharedFields call just above (both derive from the same
+        // resolved name), but harmless and keeps propagateAuthor correct on
+        // its own for its other callers.
+        if (authorChangeDetail) {
+          await propagateAuthor(tx, submission.hackFamilyId, params.id, authorTarget);
+        }
+        // The text edit above just fanned the new plain name out to every
+        // other version (propagateSharedFields), so any link those versions
+        // had to an Author row is now stale for the same reason this one's
+        // was — clear it. Only when the text actually fanned out.
+        if (unlinkAuthorOnTextEdit && hasSharedChanges) {
+          await tx.submission.updateMany({
+            where: { hackFamilyId: submission.hackFamilyId, id: { not: params.id } },
+            data: { authorId: null },
+          });
+        }
       }
 
       return result;
@@ -383,9 +458,11 @@ export async function PATCH(
       details: {
         fields: [...Object.keys(updateData), ...Object.keys(mappingChanges), ...(hasTagChanges ? ['tags'] : [])],
         by: session.user.id,
-        appliedToAllVersions: !!submission.hackFamilyId && applyToAllVersions && (hasSharedChanges || hasTagChanges || !!franchiseChangeDetail),
+        appliedToAllVersions: !!submission.hackFamilyId && applyToAllVersions && (hasSharedChanges || hasTagChanges || !!franchiseChangeDetail || !!authorChangeDetail),
         ...(baseRomChangeDetail ? { baseRomChange: baseRomChangeDetail } : {}),
         ...(franchiseChangeDetail ? { franchiseChange: franchiseChangeDetail } : {}),
+        ...(authorChangeDetail ? { authorChange: authorChangeDetail } : {}),
+        ...(unlinkAuthorOnTextEdit ? { authorUnlinkedByTextEdit: true } : {}),
       },
       userId: session.user.id,
       submissionId: params.id,

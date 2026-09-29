@@ -60,6 +60,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       gameMapping: true,
       baseRom: { select: { id: true, name: true, status: true, fileExtension: true } },
       franchise: { select: { id: true, name: true, status: true } },
+      authorRef: { select: { id: true, name: true, status: true } },
     },
   });
 
@@ -79,7 +80,12 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   return NextResponse.json({
     hackName: submission.hackName,
     platform: submission.platform,
-    author: submission.author,
+    // Linked Author row (or null) for the picker, plus the plain name as the fallback for a
+    // version whose author was never linked — see SubmitForm's legacyAuthor.
+    author: submission.authorRef
+      ? { id: submission.authorRef.id, name: submission.authorRef.name, status: submission.authorRef.status }
+      : null,
+    authorName: submission.author,
     description: submission.description,
     sourceUrl: submission.sourceUrl,
     notes: submission.notes,

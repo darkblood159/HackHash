@@ -108,6 +108,36 @@ model Submission {
   translationLanguages String[]      @default([])
   description       String?          @db.Text
   author            String?
+  // Person/team credited with the hack, resolved through the shared,
+  // deduplicated Author list (see the Author model below) instead of
+  // typing free text every time — same "don't let three near-identical
+  // rows exist for the same identity" reasoning as franchiseId below.
+  // OPTIONAL, exactly like franchiseId: plenty of hacks have no clearly
+  // known author (or an author who never bothered to have one canonical
+  // row), so null is a normal, permanent state here, not a legacy gap.
+  //
+  // Named authorId/authorRef rather than the authorId/author pairing
+  // franchiseId/franchise and baseRomId/baseRom use, purely because
+  // `author` (the plain string column just above) already occupies that
+  // name — it predates this relation by months and is far too deeply read
+  // (search, the DAT export/import, HackFamily's shared-field propagation,
+  // the /submissions?author=... exact-match filter link) to rename.
+  // Instead, `author` is kept as an always-in-sync DENORMALIZED CACHE of
+  // authorRef.name: every write path that sets authorId also (re)writes
+  // `author` to match that Author row's CURRENT name, resolved server-side
+  // — never trusted from a client-sent string (see src/lib/author.ts,
+  // specifically propagateAuthor/reassignSubmissionAuthor). This is the
+  // same two-column "simple legacy value + precise source of truth" shape
+  // releaseYear/releaseDate already use below, just for an identity
+  // instead of a date.
+  //
+  // Pre-existing submissions (an author typed in free-text before this
+  // system existed) simply have authorId left null — nothing is
+  // backfilled/transformed, their `author` string keeps displaying/
+  // searching/exporting exactly as it always has, same as franchiseId's
+  // own "nothing gets a franchise automatically" launch note.
+  authorId          String?
+  authorRef         Author?          @relation(fields: [authorId], references: [id], onDelete: SetNull)
   // Year-only precision, e.g. "we know it's 2003 but not the exact date."
   // Kept indefinitely as the fallback for anything that only has this —
   // NEVER backfilled/fabricated onto releaseDate below. See releaseDate's
@@ -240,6 +270,7 @@ model Submission {
   @@index([hackFamilyId])
   @@index([baseRomId])
   @@index([franchiseId])
+  @@index([authorId])
 }
 
 enum SubmissionStatus {
@@ -474,6 +505,46 @@ model Franchise {
   approvedById  String?
   approvedAt    DateTime?
   createdAt     DateTime        @default(now())
+
+  submissions   Submission[]
+
+  @@index([status])
+}
+
+// ─── Authors ───────────────────────────────────────────────────────────────────
+// A shared, deduplicated list of the people/teams credited with hacks — same
+// PENDING/APPROVED-then-merge-not-reject shape as Franchise just above (an
+// author has no hash to verify and nothing to "reject," so the moderation
+// problem is purely "is this a duplicate of someone already listed," same as
+// a franchise). Submission.authorId (see that field's own long comment)
+// points here; Submission.author (a plain string that predates this model)
+// is kept as a denormalized, always-in-sync cache of whichever Author row a
+// submission links to — see src/lib/author.ts for the resolve/propagate/
+// merge logic that keeps the two in agreement.
+//
+// nameKey (normalizeNameKey() from src/lib/hackFamily.ts, the same
+// normalizer HackFamily and Franchise both use) is the identity/dedupe key —
+// globally unique, not platform-scoped, since one person hacks across many
+// systems. See resolveOrCreateAuthor in src/lib/author.ts.
+//
+// submittedById/approvedById are plain scalar columns with no @relation —
+// same shape Franchise/BaseRom already use, for the same reason (this
+// feature never needs to join through to a user, and doesn't touch the User
+// model at all).
+enum AuthorStatus {
+  PENDING
+  APPROVED
+}
+
+model Author {
+  id            String       @id @default(cuid())
+  name          String
+  nameKey       String       @unique
+  status        AuthorStatus @default(PENDING)
+  submittedById String?
+  approvedById  String?
+  approvedAt    DateTime?
+  createdAt     DateTime     @default(now())
 
   submissions   Submission[]
 
@@ -843,6 +914,15 @@ model ChangeRequest {
   // time (reassignSubmissionFranchise in src/lib/franchise.ts). null/absent
   // = no franchise change proposed.
   proposedFranchise Json?
+  // Proposed author reassignment. Same shape and null-is-valid reasoning as
+  // proposedFranchise just above (author is optional on a Submission too):
+  // { id: string | null, name: string | null }, name being a display-only
+  // snapshot and the actual change re-validated against the live Author row
+  // by id at approval time (reassignSubmissionAuthor in src/lib/author.ts,
+  // which also keeps Submission.author's denormalized string cache in sync
+  // — see that field's own comment). null/absent = no author change
+  // proposed.
+  proposedAuthor Json?
   reason        String?             @db.Text
   status        ChangeRequestStatus @default(PENDING)
   reviewedById  String?

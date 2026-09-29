@@ -10,6 +10,7 @@ import { MAPPING_FIELD_KEYS, stripMappingValues } from '@/lib/mappingFields';
 import { SHARED_FIELD_KEYS } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
 import { validateFranchiseAssignment, FranchiseAssignError } from '@/lib/franchise';
+import { validateAuthorAssignment, AuthorAssignError } from '@/lib/author';
 import { ALL_TAG_SLUGS } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 
@@ -93,9 +94,19 @@ const changeRequestSchema = z.object({
     id: z.string().nullable(),
     name: z.string().nullable(),
   }).optional(),
+  // Proposed author change — same { id, name } display-snapshot shape and
+  // same null-id-is-valid reasoning as proposedFranchise just above (author
+  // is optional on a submission too). Re-validated against the live Author
+  // by id below and again at approval time (reassignSubmissionAuthor in
+  // src/lib/author.ts, which also keeps Submission.author's denormalized
+  // string cache in sync).
+  proposedAuthor: z.object({
+    id: z.string().nullable(),
+    name: z.string().nullable(),
+  }).optional(),
 }).refine(
-  (data) => Object.keys(data.changes).length > 0 || data.proposedTags !== undefined || data.proposedTranslationLanguages !== undefined || data.proposedFamily !== undefined || data.proposedBaseRom !== undefined || data.proposedFranchise !== undefined,
-  { message: 'Propose at least one change — a field edit, a tag change, a family change, a base ROM change, or a franchise change' }
+  (data) => Object.keys(data.changes).length > 0 || data.proposedTags !== undefined || data.proposedTranslationLanguages !== undefined || data.proposedFamily !== undefined || data.proposedBaseRom !== undefined || data.proposedFranchise !== undefined || data.proposedAuthor !== undefined,
+  { message: 'Propose at least one change — a field edit, a tag change, a family change, a base ROM change, a franchise change, or an author change' }
 );
 
 // FLAGGED-BUT-DEFERRED GAP, NOW CLOSED (see CLAUDE_HANDOFF.txt section 2w):
@@ -224,6 +235,19 @@ export async function POST(
     }
   }
 
+  // Same courtesy-check-now, authoritative-re-check-at-approval arrangement
+  // as proposedFranchise just above; null just means "remove it".
+  if (parsed.data.proposedAuthor?.id) {
+    try {
+      await validateAuthorAssignment(prisma, parsed.data.proposedAuthor.id);
+    } catch (err) {
+      if (err instanceof AuthorAssignError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
+  }
+
   const changeRequest = await prisma.changeRequest.create({
     data: {
       submissionId: params.id,
@@ -236,6 +260,7 @@ export async function POST(
       proposedFamily: parsed.data.proposedFamily !== undefined ? (parsed.data.proposedFamily as any) : undefined,
       proposedBaseRom: parsed.data.proposedBaseRom !== undefined ? (parsed.data.proposedBaseRom as any) : undefined,
       proposedFranchise: parsed.data.proposedFranchise !== undefined ? (parsed.data.proposedFranchise as any) : undefined,
+      proposedAuthor: parsed.data.proposedAuthor !== undefined ? (parsed.data.proposedAuthor as any) : undefined,
     },
     include: {
       requestedBy: { select: { id: true, name: true, image: true } },
@@ -254,6 +279,7 @@ export async function POST(
         proposedFamily: parsed.data.proposedFamily,
         proposedBaseRom: parsed.data.proposedBaseRom,
         proposedFranchise: parsed.data.proposedFranchise,
+        proposedAuthor: parsed.data.proposedAuthor,
       },
       userId: session.user.id,
       submissionId: params.id,

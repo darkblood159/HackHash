@@ -28,6 +28,7 @@ export const FIELD_LABELS: Record<string, string> = {
   patchSha1: 'Patch SHA-1',
   baseRomId: 'Base ROM',
   franchiseId: 'Franchise',
+  authorId: 'Author',
   filename: 'ROM filename',
   fileSize: 'File size',
   crc32: 'CRC32',

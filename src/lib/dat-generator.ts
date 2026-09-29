@@ -124,6 +124,16 @@ interface DetailedEntry {
     // approved franchise instead of resetting it to pending — see
     // resolveOrCreateFranchise in src/lib/franchise.ts.
     franchise: { name: string; status: string } | null;
+    // The Author row this submission is linked to (see the Author model in
+    // prisma/schema.prisma), or null — including for every submission whose
+    // author was only ever plain text, which still round-trips through
+    // `author` above exactly as before. Named authorRef, not author,
+    // because `author` (the plain string) already occupies that key one
+    // level up. Includes status for the same reason franchise does: a
+    // re-import should preserve an already-approved author instead of
+    // resetting it to pending — see resolveOrCreateAuthor in
+    // src/lib/author.ts.
+    authorRef: { name: string; status: string } | null;
 
     // Other compressed/container copies of this exact file that a trusted
     // reviewer has confirmed (see the AlternateFormat model's own comment
@@ -266,6 +276,7 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
           hackFamily: true,
           baseRom: true,
           franchise: true,
+          authorRef: true,
           alternateFormats: { where: { status: 'APPROVED' }, orderBy: { createdAt: 'asc' } },
         },
       },
@@ -340,6 +351,9 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
           : null,
         franchise: sub?.franchise
           ? { name: sub.franchise.name, status: sub.franchise.status }
+          : null,
+        authorRef: sub?.authorRef
+          ? { name: sub.authorRef.name, status: sub.authorRef.status }
           : null,
 
         alternateFormats: sub?.alternateFormats.map((af) => ({

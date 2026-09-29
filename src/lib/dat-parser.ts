@@ -61,6 +61,15 @@ export interface ParsedDatEntry {
     name: string;
     status?: string;
   };
+  // The Author row this entry was linked to in the source database, if any
+  // — present only for a "detailed" export re-import, and absent for a
+  // submission whose author was only ever plain text (that still arrives
+  // through the plain `author` field like always). status carried through
+  // so an already-approved author isn't reset to pending, same as franchise.
+  authorRef?: {
+    name: string;
+    status?: string;
+  };
   // Other compressed/container copies of this exact file (see the
   // AlternateFormat model's own comment in prisma/schema.prisma) —
   // present only for a "detailed" export re-import, and only ever
@@ -263,6 +272,14 @@ export function parseDatJson(jsonText: string): ParsedDatEntry[] {
               franchise: {
                 name: String(d.franchise.name).trim(),
                 ...(d.franchise.status ? { status: String(d.franchise.status).trim() } : {}),
+              },
+            }
+          : {}),
+        ...(d?.authorRef?.name
+          ? {
+              authorRef: {
+                name: String(d.authorRef.name).trim(),
+                ...(d.authorRef.status ? { status: String(d.authorRef.status).trim() } : {}),
               },
             }
           : {}),

@@ -37,6 +37,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
           gameMapping: true,
           tags: { select: { tag: { select: { slug: true } } } },
           franchise: { select: { id: true, name: true, status: true } },
+          authorRef: { select: { id: true, name: true, status: true } },
         },
       },
     },
@@ -58,13 +59,24 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   const franchiseSource = [...family.submissions]
     .filter((s) => s.franchise)
     .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+  // Author: same "most recently touched version that actually HAS a linked
+  // one" rule as franchise above. A family's plain `author` string (still
+  // returned below as authorName) is the fallback for the many hacks whose
+  // author was typed before the Author list existed and was never linked.
+  const authorSource = [...family.submissions]
+    .filter((s) => s.authorRef)
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
 
   const m = mappingSource?.gameMapping;
 
   return NextResponse.json({
     name: family.name,
     platform: family.platform,
-    author: family.author,
+    // The linked Author row (or null), same shape as `franchise` below — this is what the
+    // form's author picker is filled from. authorName is the plain-text fallback for a
+    // family with no linked author yet; see SubmitForm's legacyAuthor.
+    author: authorSource?.authorRef ?? null,
+    authorName: family.author,
     releaseYear: family.releaseYear,
     releaseDate: toISODateOnly(family.releaseDate),
     description: family.description,

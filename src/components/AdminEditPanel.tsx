@@ -15,6 +15,7 @@ import { describeValidationError } from '@/lib/fieldLabels';
 import { FamilyPicker, type SelectedFamily } from './FamilyPicker';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
 import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
+import { AuthorPicker, type SelectedAuthor } from './AuthorPicker';
 import { SubmissionPreviewOverlay, type SubmissionPreviewData, type SubmissionPreviewFields } from './SubmissionPreview';
 
 interface AdminEditPanelProps {
@@ -51,6 +52,8 @@ interface AdminEditPanelProps {
   currentFamily?: SelectedFamily | null;
   currentBaseRom?: SelectedBaseRom | null;
   currentFranchise?: SelectedFranchise | null;
+  // The Author row this submission is linked to, or null — including for every submission whose author was typed as plain text before the Author list existed (initial.author still holds that text).
+  currentAuthor?: SelectedAuthor | null;
   hasOtherVersions?: boolean; // whether this hack has sibling versions to sync with
   // Read-only, for the preview only — never edited by this panel, but
   // real, always-visible content on the actual page (File metadata card,
@@ -61,14 +64,13 @@ interface AdminEditPanelProps {
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
 
-export function AdminEditPanel({ submissionId, status, initial, mapping, tags, currentFamily = null, currentBaseRom = null, currentFranchise = null, hasOtherVersions, fileInfo, verificationScore }: AdminEditPanelProps) {
+export function AdminEditPanel({ submissionId, status, initial, mapping, tags, currentFamily = null, currentBaseRom = null, currentFranchise = null, currentAuthor = null, hasOtherVersions, fileInfo, verificationScore }: AdminEditPanelProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
     hackName: initial.hackName,
     version: initial.version,
     platform: initial.platform,
-    author: initial.author ?? '',
     releaseYear: initial.releaseYear ? String(initial.releaseYear) : '',
     releaseDate: initial.releaseDate ?? '',
     description: initial.description ?? '',
@@ -85,6 +87,14 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
   const [selectedFamily, setSelectedFamily] = useState<SelectedFamily | null>(currentFamily);
   const [selectedBaseRom, setSelectedBaseRom] = useState<SelectedBaseRom | null>(currentBaseRom);
   const [selectedFranchise, setSelectedFranchise] = useState<SelectedFranchise | null>(currentFranchise);
+  const [selectedAuthor, setSelectedAuthor] = useState<SelectedAuthor | null>(currentAuthor);
+  // Plain diff, same reasoning as franchiseChanged in save() below (author is
+  // optional, AuthorPicker's "Change" keeps the old value until a new one is
+  // actually picked). Note a submission with only a legacy plain-text author
+  // has currentAuthor null AND starts with selectedAuthor null, so merely
+  // opening the panel is NOT a change — the existing text is left untouched
+  // unless someone actually picks, adds, or removes an author.
+  const authorChanged = (selectedAuthor?.id ?? null) !== (currentAuthor?.id ?? null);
   const [applyToAllVersions, setApplyToAllVersions] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -145,7 +155,6 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
       if (form.hackName !== initial.hackName) changes.hackName = form.hackName;
       if (form.version !== initial.version) changes.version = form.version;
       if (form.platform !== initial.platform) changes.platform = form.platform;
-      if (form.author !== (initial.author ?? '')) changes.author = form.author || null;
       if (form.description !== (initial.description ?? '')) changes.description = form.description || null;
       if (form.versionChangelog !== (initial.versionChangelog ?? '')) changes.versionChangelog = form.versionChangelog || null;
       if (form.sourceUrl !== (initial.sourceUrl ?? '')) changes.sourceUrl = form.sourceUrl || null;
@@ -192,7 +201,7 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
 
       const hasMainPayload =
         Object.keys(changes).length > 0 || Object.keys(mappingPayload).length > 0 ||
-        tagsChanged || translationLanguagesChanged || baseRomChanged || franchiseChanged;
+        tagsChanged || translationLanguagesChanged || baseRomChanged || franchiseChanged || authorChanged;
 
       if (!hasMainPayload && !familyChanged) {
         // Nothing actually changed — closing the panel without a wasted
@@ -213,6 +222,7 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
             applyToAllVersions,
             ...(baseRomChanged ? { baseRomId: selectedBaseRom!.id } : {}),
             ...(franchiseChanged ? { franchiseId: selectedFranchise?.id ?? null } : {}),
+            ...(authorChanged ? { authorId: selectedAuthor?.id ?? null } : {}),
             ...mappingPayload,
           }),
         });
@@ -289,7 +299,9 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
       hackName: form.hackName,
       version: form.version,
       platform: form.platform,
-      author: form.author || null,
+      // Falls back to the untouched original text when the picker wasn't used — otherwise a
+      // legacy plain-text author (no linked Author row) would preview as "cleared".
+      author: authorChanged ? (selectedAuthor?.name ?? null) : initial.author,
       releaseYear,
       releaseDate,
       description: form.description || null,
@@ -348,7 +360,16 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-text-muted mb-1">Author</label>
-            <input className={inputClass} value={form.author} onChange={(e) => update('author', e.target.value)} />
+            {!currentAuthor && initial.author && !selectedAuthor && (
+              <p className="text-[11px] text-text-muted mb-1">
+                On file as plain text: &ldquo;{initial.author}&rdquo; (not linked to the author list). Left as-is unless you pick one below.
+              </p>
+            )}
+            <AuthorPicker
+              value={selectedAuthor}
+              onChange={setSelectedAuthor}
+              initialQuery={!currentAuthor && initial.author ? initial.author : undefined}
+            />
           </div>
           <div>
             <label className="block text-xs text-text-muted mb-1">Release date</label>

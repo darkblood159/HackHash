@@ -149,6 +149,7 @@ export async function generateFullBackup(
     dismissedFamilyPairs,
     baseRoms,
     franchises,
+    authors,
     datImports,
     submissions,
     changeRequests,
@@ -170,6 +171,7 @@ export async function generateFullBackup(
     prisma.dismissedFamilyPair.findMany(),
     prisma.baseRom.findMany(),
     prisma.franchise.findMany(),
+    prisma.author.findMany(),
     prisma.datImport.findMany(),
     prisma.submission.findMany(),
     prisma.changeRequest.findMany(),
@@ -207,6 +209,7 @@ export async function generateFullBackup(
     dismissedFamilyPairs: dismissedFamilyPairs,
     baseRoms: baseRoms,
     franchises: franchises,
+    authors: authors,
     datImports: datImports,
     submissions: submissions.map((s) => ({ ...s, fileSize: s.fileSize.toString() })),
     changeRequests: changeRequests,
@@ -256,6 +259,8 @@ const RESTORE_ORDER = [
   'baseRoms',
   // Before 'submissions' — Submission.franchiseId is a foreign key to this.
   'franchises',
+  // Before 'submissions' too — Submission.authorId is a foreign key to this.
+  'authors',
   'datImports',
   'submissions',
   // After 'submissions' and 'users' — ChangeRequest.submissionId and
@@ -293,7 +298,9 @@ const WIPE_ORDER = [...RESTORE_ORDER].reverse();
 // everything it does have; any change requests live in the database at
 // restore time are wiped along with it, same trade-off an old
 // franchise-less backup already makes for franchises.
-const OPTIONAL_TABLES = ['franchises', 'changeRequests'] as const;
+// 'authors' is optional for the same reason 'franchises' is: a backup taken before the Author
+// list shipped has no "authors" key, and that's a complete, valid backup of the schema as it was then.
+const OPTIONAL_TABLES = ['franchises', 'authors', 'changeRequests'] as const;
 
 // tx.model.deleteMany({}) for a table name that isn't a Prisma delegate
 // (there isn't one — this list is hand-matched 1:1 against RESTORE_ORDER
@@ -307,6 +314,7 @@ const MODEL_FOR_KEY: Record<string, string> = {
   dismissedFamilyPairs: 'dismissedFamilyPair',
   baseRoms: 'baseRom',
   franchises: 'franchise',
+  authors: 'author',
   datImports: 'datImport',
   submissions: 'submission',
   changeRequests: 'changeRequest',
@@ -376,6 +384,7 @@ const ROW_MAPPERS: Record<string, (r: any) => any> = {
   dismissedFamilyPairs: (p) => ({ ...p, dismissedAt: parseDateReq(p.dismissedAt) }),
   baseRoms: (b) => ({ ...b, approvedAt: parseDate(b.approvedAt), createdAt: parseDateReq(b.createdAt) }),
   franchises: (f) => ({ ...f, approvedAt: parseDate(f.approvedAt), createdAt: parseDateReq(f.createdAt) }),
+  authors: (a) => ({ ...a, approvedAt: parseDate(a.approvedAt), createdAt: parseDateReq(a.createdAt) }),
   datImports: (d) => ({ ...d, reversedAt: parseDate(d.reversedAt), createdAt: parseDateReq(d.createdAt) }),
   submissions: (s) => ({
     ...s,
@@ -387,7 +396,7 @@ const ROW_MAPPERS: Record<string, (r: any) => any> = {
     deletedAt: parseDate(s.deletedAt),
   }),
   // Json fields (changes/proposedTags/proposedTranslationLanguages/
-  // proposedFamily/proposedBaseRom/proposedFranchise) need no date/BigInt
+  // proposedFamily/proposedBaseRom/proposedFranchise/proposedAuthor) need no date/BigInt
   // handling of their own — they only ever hold plain strings/booleans/null
   // (see the schema comments on each), which JSON.stringify/parse already
   // round-trip correctly on their own.
@@ -402,6 +411,7 @@ const ROW_MAPPERS: Record<string, (r: any) => any> = {
     proposedFamily: c.proposedFamily ?? null,
     proposedBaseRom: c.proposedBaseRom ?? null,
     proposedFranchise: c.proposedFranchise ?? null,
+    proposedAuthor: c.proposedAuthor ?? null,
     reason: c.reason ?? null,
     status: c.status,
     reviewedById: c.reviewedById ?? null,

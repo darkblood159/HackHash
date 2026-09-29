@@ -11,6 +11,7 @@ import { stripMappingValues } from '@/lib/mappingFields';
 import { resolveOrCreateFamily, resolveReleaseFields } from '@/lib/hackFamily';
 import { resolveOrCreateBaseRom } from '@/lib/baseRom';
 import { resolveOrCreateFranchise, FranchiseNameError } from '@/lib/franchise';
+import { resolveOrCreateAuthor, AuthorNameError } from '@/lib/author';
 import { statPatchFile, buildPatchDisplaySlug } from '@/lib/patchStorage';
 import type { PatchTypeValue } from '@/lib/patchTypes';
 
@@ -78,6 +79,14 @@ const entrySchema = z.object({
   // in an uploaded file should degrade to a sensible default at use time,
   // not fail validation for the entire import.
   franchise: z.object({
+    name: z.string().min(1).max(300),
+    status: z.string().optional(),
+  }).optional(),
+  // The Author row this hack was linked to in the source database, present
+  // only for a detailed-export re-import (absent for a hack whose author was
+  // only ever plain text — that still arrives via `author` above). Same
+  // plain-string status, same degrade-at-use-time reasoning as franchise.
+  authorRef: z.object({
     name: z.string().min(1).max(300),
     status: z.string().optional(),
   }).optional(),
@@ -428,6 +437,44 @@ export async function POST(req: NextRequest) {
                 await tx.submission.update({ where: { id: submission.id }, data: { franchiseId } });
               } catch (err) {
                 if (!(err instanceof FranchiseNameError)) throw err;
+              }
+            }
+
+            // Author — same detailed-export-only treatment and same
+            // preserve-the-source-status reasoning as franchise just above.
+            // Resolves by normalized name, so importing many hacks by one
+            // author produces ONE Author row, and re-importing over an
+            // existing database reuses what's already there. Unlike
+            // franchise, this writes TWO columns: the resolved row's name
+            // also goes into the submission's `author` string (a
+            // denormalized cache of the linked Author's name — see
+            // Submission.authorId in prisma/schema.prisma), so the two can
+            // never disagree even when an existing row spells the name with
+            // different casing than the imported file did. A name that
+            // can't be an author at all (no letters/numbers, or over the
+            // length cap, from a hand-edited file) is skipped rather than
+            // failing the whole entry — the plain `author` string set at
+            // creation above is left as it was.
+            if (entry.authorRef) {
+              const authorStatus = entry.authorRef.status === 'PENDING' ? 'PENDING' : 'APPROVED';
+              try {
+                const resolvedAuthor = await resolveOrCreateAuthor(
+                  tx,
+                  {
+                    name: entry.authorRef.name,
+                    submittedById: session.user.id,
+                    status: authorStatus,
+                    approvedById: authorStatus === 'APPROVED' ? session.user.id : null,
+                    approvedAt: authorStatus === 'APPROVED' ? new Date() : null,
+                  },
+                  true // tx here is an open prisma.$transaction — see resolveOrCreateAuthor's inTransaction param
+                );
+                await tx.submission.update({
+                  where: { id: submission.id },
+                  data: { authorId: resolvedAuthor.authorId, author: resolvedAuthor.name },
+                });
+              } catch (err) {
+                if (!(err instanceof AuthorNameError)) throw err;
               }
             }
 

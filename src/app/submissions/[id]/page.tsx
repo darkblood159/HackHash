@@ -81,6 +81,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
       gameMapping: true,
       baseRom: true,
       franchise: { select: { id: true, name: true, status: true } },
+      authorRef: { select: { id: true, name: true, status: true } },
       hackFamily: { select: { id: true, name: true } },
       alternateFormats: {
         orderBy: { createdAt: 'asc' },
@@ -212,6 +213,11 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
                   <Link href={`/submissions?author=${encodeURIComponent(submission.author)}`} className="hover:text-phosphor hover:underline">
                     {submission.author}
                   </Link>
+                  {/* Same convention as the franchise badge below: a newly proposed author
+                      still awaiting admin review is usable right away, just tagged. */}
+                  {submission.authorRef?.status === 'PENDING' && (
+                    <span className="ml-1 text-[10px] text-status-pending" title="Author pending admin review">(pending)</span>
+                  )}
                 </>
               )}
               {submission.author && (submission.releaseYear || submission.releaseDate) && ' · '}
@@ -555,6 +561,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
             currentFamily={submission.hackFamily}
             currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
             currentFranchise={submission.franchise}
+            currentAuthor={submission.authorRef}
             currentTags={submission.tags.map((t: any) => t.tag.slug)}
             currentTranslationLanguages={submission.translationLanguages}
             initialRequests={submission.changeRequests as any}
@@ -639,6 +646,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               currentFamily={submission.hackFamily}
               currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
               currentFranchise={submission.franchise}
+              currentAuthor={submission.authorRef}
               hasOtherVersions={siblingVersions.length > 0}
               fileInfo={{
                 filename: submission.filename,
