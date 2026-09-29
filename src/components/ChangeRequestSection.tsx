@@ -258,6 +258,7 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
       mapping: currentMapping ?? {},
       baseRom: currentBaseRom,
       family: currentFamily,
+      franchise: currentFranchise,
     };
     const proposed: SubmissionPreviewFields = {
       ...currentFields,
@@ -283,6 +284,7 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
       mapping: mappingForm,
       baseRom: selectedBaseRom,
       family: selectedFamily,
+      franchise: selectedFranchise,
     };
     return { status, verificationScore, fileInfo, current: currentFields, proposed };
   };

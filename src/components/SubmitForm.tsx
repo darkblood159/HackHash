@@ -4,14 +4,14 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
-import { ROMProcessor } from './ROMProcessor';
-import { MappingsSection } from './MappingsSection';
+import { ROMProcessor, formatBytes } from './ROMProcessor';
+import { MappingsSection, type MappingValues } from './MappingsSection';
 import { HackNameAutocomplete, type HackFamilySuggestion } from './HackNameAutocomplete';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
 import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
 import { AuthorPicker, type SelectedAuthor } from './AuthorPicker';
 import { Button } from './ui/Button';
-import { AlertTriangle, CheckCircle2, ChevronLeft, FileWarning, Sparkles } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronLeft, Eye, FileWarning, Sparkles } from 'lucide-react';
 import type { ROMFileInfo } from '@/types';
 import { PLATFORMS, PLATFORM_LABELS } from '@/types';
 import { TRANSLATION_TRIGGER_SLUGS } from '@/lib/tags';
@@ -22,6 +22,7 @@ import { parseRomFilename } from '@/lib/filenameParser';
 import { MAPPING_FIELD_KEYS } from '@/lib/mappingFields';
 import { PATCH_TYPES, patchTypeLabel } from '@/lib/patchTypes';
 import { PatchDropzone, type ParsedPatch } from './PatchDropzone';
+import { SubmissionPreviewOverlay, type SubmissionPreviewData, type SubmissionPreviewFields } from './SubmissionPreview';
 
 interface FormState {
   hackName: string;
@@ -123,6 +124,18 @@ export function SubmitForm() {
   const [success, setSuccess] = useState<string | null>(null);
   const [changeRequestSubmitted, setChangeRequestSubmitted] = useState<string | null>(null);
   const [justPromoted, setJustPromoted] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  // The preview only makes sense on step 2 of a brand-new entry. Defensive:
+  // the overlay covers the whole viewport, so "Back"/"Re-hash" can't normally
+  // be clicked while it's open — but they're still reachable by keyboard
+  // behind it. Without this, that would leave a stale `true` that pops the
+  // overlay open again on the next file's step 2. (earlyDuplicate is
+  // always settled before step 2 is reached — see handleFileProcessed — so
+  // it can't flip while the overlay is open; it's listed for completeness.)
+  useEffect(() => {
+    if (step !== 2 || earlyDuplicate) setPreviewOpen(false);
+  }, [step, earlyDuplicate]);
 
   // Name-similarity check — tells the submitter if this hackName exactly
   // matches (or closely resembles) an existing hack on the same platform.
@@ -651,6 +664,66 @@ export function SubmitForm() {
     }
   };
 
+  // Snapshot of the in-progress form as it would look on the real submission
+  // page, for SubmissionPreviewOverlay (mode 'new' — nothing to diff against,
+  // so no change-highlighting). Nothing here is sent or saved. Field-by-field
+  // this mirrors what handleSubmit's POST body would send, so the preview
+  // can't show something the submission wouldn't actually contain. Takes the
+  // hashed ROM as an argument so the caller (which has already narrowed
+  // romInfo to non-null) doesn't need a non-null assertion.
+  const buildPreviewData = (rom: ROMFileInfo): SubmissionPreviewData => {
+    const mapping: MappingValues = {};
+    for (const key of MAPPING_FIELD_KEYS) {
+      if (form[key]) mapping[key] = form[key];
+    }
+    const fields: SubmissionPreviewFields = {
+      hackName: form.hackName,
+      version: form.version,
+      platform: form.platform,
+      // A picked Author wins; the carried-over plain-text name only stands in
+      // while nothing's been picked (same rule as the POST body).
+      author: author?.name ?? legacyAuthor ?? null,
+      releaseYear: form.releaseYear ? parseInt(form.releaseYear, 10) : null,
+      releaseDate: form.releaseDate || null,
+      description: form.description || null,
+      versionChangelog: form.versionChangelog || null,
+      notes: form.notes || null,
+      releasePageUrl: form.releasePageUrl || null,
+      githubUrl: form.githubUrl || null,
+      sourceUrl: form.sourceUrl || null,
+      patchType: form.patchType || null,
+      patchFilename: form.patchFilename || null,
+      patchSha1: form.patchSha1 || null,
+      tags: form.tags,
+      translationLanguages: form.translationLanguages,
+      mapping,
+      baseRom,
+      // Family isn't picked on this form — the server derives it from the
+      // hack name. An exact name match is the one case we already know about
+      // client-side (it's what drives the "added as a new version of…"
+      // banner), so that's the only case worth showing here.
+      family: nameCheck?.exactMatch ? { id: nameCheck.exactMatch.id, name: nameCheck.exactMatch.name } : null,
+      franchise,
+    };
+    return {
+      mode: 'new',
+      // A submission always starts life pending, with no votes yet.
+      status: 'PENDING',
+      verificationScore: 0,
+      fileInfo: {
+        filename: rom.filename,
+        fileSize: formatBytes(rom.fileSize),
+        crc32: rom.crc32,
+        md5: rom.md5,
+        sha1: rom.sha1,
+      },
+      // The overlay ignores `current` in 'new' mode; the same object keeps
+      // the type honest without inventing a fake "before".
+      current: fields,
+      proposed: fields,
+    };
+  };
+
   // ── Banned gate ──
   if (status === 'authenticated' && session?.user.isBanned) {
     return (
@@ -1140,8 +1213,22 @@ export function SubmitForm() {
             <Button type="submit" loading={submitting} disabled={!!duplicateWarning}>
               {earlyDuplicate ? 'Submit updated information' : 'Submit for review'}
             </Button>
+            {/* type="button" is required — Button doesn't default it, and inside
+                this <form> an untyped button would submit. Hidden while
+                earlyDuplicate is set: in that case submitting doesn't create a
+                new entry at all (it proposes changes to the existing one), so
+                a "here's your new entry's page" preview would be misleading. */}
+            {!earlyDuplicate && (
+              <Button type="button" variant="outline" onClick={() => setPreviewOpen(true)}>
+                <Eye size={14} /> Preview
+              </Button>
+            )}
             <Button type="button" variant="ghost" onClick={() => { setStep(1); setEarlyDuplicate(null); }}>Back</Button>
           </div>
+
+          {previewOpen && (
+            <SubmissionPreviewOverlay open onClose={() => setPreviewOpen(false)} data={buildPreviewData(romInfo)} />
+          )}
         </form>
       )}
     </div>

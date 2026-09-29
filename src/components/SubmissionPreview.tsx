@@ -2,10 +2,11 @@
 
 // src/components/SubmissionPreview.tsx
 //
-// Shared "preview before you save/propose" overlay for the two places a
-// submission's fields get edited from its own detail page — AdminEditPanel
-// (direct, applies immediately) and ChangeRequestSection (proposed,
-// applies once an admin approves it). Neither commits anything; this just
+// Shared "preview before you save/propose/submit" overlay for the three
+// places a submission's fields get filled in — AdminEditPanel (direct edit,
+// applies immediately), ChangeRequestSection (proposed edit, applies once an
+// admin approves it), and SubmitForm (a brand-new entry, `mode: 'new'`, see
+// SubmissionPreviewData below). None of them commit anything; this just
 // renders the SAME visual pieces submissions/[id]/page.tsx itself uses
 // (PlatformBadge/TagBadge/StatusBadge/ScoreGauge/MappingsDisplay/
 // ReleaseDate), in the same page-width layout with the same card classes,
@@ -50,6 +51,7 @@ import { ExternalLink, FileText, Github } from 'lucide-react';
 import type { MappingValues } from './MappingsSection';
 import type { SelectedBaseRom } from './BaseRomPicker';
 import type { SelectedFamily } from './FamilyPicker';
+import type { SelectedFranchise } from './FranchisePicker';
 
 export interface SubmissionPreviewFields {
   hackName: string;
@@ -72,9 +74,23 @@ export interface SubmissionPreviewFields {
   mapping: MappingValues;
   baseRom: SelectedBaseRom | null;
   family: SelectedFamily | null;
+  // Added (Sep 29 2026) because the real page shows a franchise badge in the
+  // header and this overlay predated franchises. All three consumers
+  // (SubmitForm, AdminEditPanel, ChangeRequestSection) now pass it. Still
+  // typed optional so a caller that omits it just renders no badge and never
+  // counts it as "changed" (undefined on both sides) instead of failing.
+  franchise?: SelectedFranchise | null;
 }
 
 export interface SubmissionPreviewData {
+  // 'edit' (default) diffs `proposed` against `current` and highlights what
+  // differs. 'new' is for an entry that doesn't exist yet: there's nothing to
+  // diff against, so the overlay ignores `current` entirely (treats it as
+  // identical to `proposed`) — no highlighting, no struck-through "removed"
+  // items, and the top bar says "not submitted yet" instead of "nothing
+  // saved yet". Enforced here rather than trusted to the caller, so a caller
+  // can't accidentally light up every field on a new entry.
+  mode?: 'edit' | 'new';
   // None of these three change through either edit form — passed through
   // once, never diffed against anything.
   status: string;
@@ -159,8 +175,10 @@ export function SubmissionPreviewOverlay({
 
   if (!open) return null;
 
-  const c = data.current;
+  const isNew = data.mode === 'new';
   const p = data.proposed;
+  // See SubmissionPreviewData.mode — a new entry has nothing to diff against.
+  const c = isNew ? data.proposed : data.current;
 
   const nameChanged = neq(c.hackName, p.hackName);
   const versionChanged = neq(c.version, p.version);
@@ -179,6 +197,7 @@ export function SubmissionPreviewOverlay({
   const mappingChanged = neq(c.mapping, p.mapping);
   const baseRomChanged = neq(c.baseRom?.id ?? null, p.baseRom?.id ?? null);
   const familyChanged = neq(c.family?.id ?? null, p.family?.id ?? null);
+  const franchiseChanged = neq(c.franchise?.id ?? null, p.franchise?.id ?? null);
 
   const tagRows: { slug: string; state: 'unchanged' | 'added' | 'removed' }[] = [
     ...p.tags.map((slug) => ({ slug, state: c.tags.includes(slug) ? ('unchanged' as const) : ('added' as const) })),
@@ -203,11 +222,13 @@ export function SubmissionPreviewOverlay({
           <div className="flex items-center gap-2 flex-wrap">
             <Eye size={14} className="text-highlight shrink-0" />
             <span className="text-sm font-medium text-text-primary">Preview</span>
-            <span className="text-xs text-text-muted">— nothing saved yet</span>
-            <span className="flex items-center gap-1.5 text-xs text-text-muted ml-2">
-              <span className="w-2.5 h-2.5 rounded-sm ring-1 ring-highlight/50 bg-highlight/10 inline-block shrink-0" />
-              highlighted = changed
-            </span>
+            <span className="text-xs text-text-muted">{isNew ? '— not submitted yet' : '— nothing saved yet'}</span>
+            {!isNew && (
+              <span className="flex items-center gap-1.5 text-xs text-text-muted ml-2">
+                <span className="w-2.5 h-2.5 rounded-sm ring-1 ring-highlight/50 bg-highlight/10 inline-block shrink-0" />
+                highlighted = changed
+              </span>
+            )}
           </div>
           <button
             onClick={onClose}
@@ -227,7 +248,7 @@ export function SubmissionPreviewOverlay({
                 <Diff changed={nameChanged}>{p.hackName || <em className="text-text-muted not-italic">Untitled</em>}</Diff>
               </h1>
               <span className="text-text-muted text-lg">
-                <Diff changed={versionChanged}>v{p.version}</Diff>
+                <Diff changed={versionChanged}>v{p.version || '?'}</Diff>
               </span>
             </div>
             {p.author || p.releaseYear || p.releaseDate ? (
@@ -245,8 +266,30 @@ export function SubmissionPreviewOverlay({
             )}
             <div className="flex items-center gap-1.5 mt-3 flex-wrap">
               <Diff changed={platformChanged}>
-                <PlatformBadge platform={p.platform} />
+                {p.platform ? (
+                  <PlatformBadge platform={p.platform} />
+                ) : (
+                  // Only reachable on a new entry previewed before a platform is picked.
+                  <span className="inline-flex items-center rounded-md border border-dashed border-border px-2 py-1 text-xs italic text-text-muted">
+                    No platform selected
+                  </span>
+                )}
               </Diff>
+              {/* Same look as the real page's franchise badge (submissions/[id]/page.tsx),
+                  minus the link — nothing in a preview should navigate away. */}
+              {p.franchise && (
+                <Diff changed={franchiseChanged}>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border bg-bg-surface text-xs text-text-secondary">
+                    {p.franchise.name}
+                    {p.franchise.status === 'PENDING' && <span className="text-[10px] text-status-pending">(pending)</span>}
+                  </span>
+                </Diff>
+              )}
+              {!p.franchise && c.franchise && (
+                <span className="inline-flex items-center rounded border border-status-rejected/30 px-2 py-0.5 text-xs text-status-rejected/70 line-through">
+                  {c.franchise.name}
+                </span>
+              )}
               {tagRows.map(({ slug, state }) => {
                 const def = ALL_TAGS.find((t) => t.slug === slug);
                 if (!def) return null;

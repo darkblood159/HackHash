@@ -293,6 +293,7 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
       mapping: mapping ?? {},
       baseRom: currentBaseRom,
       family: currentFamily,
+      franchise: currentFranchise,
     };
     const proposed: SubmissionPreviewFields = {
       ...current,
@@ -312,6 +313,7 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
       mapping: mappingForm,
       baseRom: selectedBaseRom,
       family: selectedFamily,
+      franchise: selectedFranchise,
     };
     return { status, verificationScore, fileInfo, current, proposed };
   };

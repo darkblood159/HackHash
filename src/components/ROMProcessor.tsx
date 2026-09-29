@@ -131,7 +131,11 @@ async function computeAllHashes(
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function formatBytes(bytes: number): string {
+// Exported (Sep 29 2026) so SubmitForm's preview can format the hashed ROM's
+// size the same way the real submission page does, rather than adding yet
+// another private copy — this one is byte-for-byte identical to the one in
+// src/app/submissions/[id]/page.tsx.
+export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB'];
