@@ -1,7 +1,7 @@
 // src/app/api/admin/settings/route.ts
 //
-// Small, admin-only settings surface — currently just the one patch-
-// uploads kill switch (src/lib/siteSettings.ts). Follows the same
+// Small, admin-only settings surface — currently two kill switches: patch
+// uploads and bulk submit (src/lib/siteSettings.ts). Follows the same
 // GET-list/POST-action shape as src/app/api/admin/users/route.ts: GET
 // returns current state, POST validates a body with zod and applies one
 // change, logging an AuditLog entry the same way every other admin
@@ -15,7 +15,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
-import { arePatchUploadsDisabled, setPatchUploadsDisabled } from '@/lib/siteSettings';
+import { arePatchUploadsDisabled, setPatchUploadsDisabled, areBulkSubmitsDisabled, setBulkSubmitsDisabled } from '@/lib/siteSettings';
 
 export async function GET() {
   const session = await getServerSession(authOptions);
@@ -23,12 +23,20 @@ export async function GET() {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  return NextResponse.json({ patchUploadsDisabled: await arePatchUploadsDisabled() });
+  return NextResponse.json({
+    patchUploadsDisabled: await arePatchUploadsDisabled(),
+    bulkSubmitDisabled: await areBulkSubmitsDisabled(),
+  });
 }
 
-const updateSettingsSchema = z.object({
-  patchUploadsDisabled: z.boolean(),
-});
+// Each switch is optional so the page can flip one without resending the
+// other; at least one must be present.
+const updateSettingsSchema = z
+  .object({
+    patchUploadsDisabled: z.boolean().optional(),
+    bulkSubmitDisabled: z.boolean().optional(),
+  })
+  .refine((v) => v.patchUploadsDisabled !== undefined || v.bulkSubmitDisabled !== undefined);
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -42,15 +50,30 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Validation failed' }, { status: 422 });
   }
 
-  const { patchUploadsDisabled } = parsed.data;
-  await setPatchUploadsDisabled(patchUploadsDisabled, session.user.id);
-  await prisma.auditLog.create({
-    data: {
-      action: patchUploadsDisabled ? 'PATCH_UPLOADS_DISABLED' : 'PATCH_UPLOADS_ENABLED',
-      details: { patchUploadsDisabled },
-      userId: session.user.id,
-    },
-  });
+  const { patchUploadsDisabled, bulkSubmitDisabled } = parsed.data;
+  if (patchUploadsDisabled !== undefined) {
+    await setPatchUploadsDisabled(patchUploadsDisabled, session.user.id);
+    await prisma.auditLog.create({
+      data: {
+        action: patchUploadsDisabled ? 'PATCH_UPLOADS_DISABLED' : 'PATCH_UPLOADS_ENABLED',
+        details: { patchUploadsDisabled },
+        userId: session.user.id,
+      },
+    });
+  }
+  if (bulkSubmitDisabled !== undefined) {
+    await setBulkSubmitsDisabled(bulkSubmitDisabled, session.user.id);
+    await prisma.auditLog.create({
+      data: {
+        action: bulkSubmitDisabled ? 'BULK_SUBMIT_DISABLED' : 'BULK_SUBMIT_ENABLED',
+        details: { bulkSubmitDisabled },
+        userId: session.user.id,
+      },
+    });
+  }
 
-  return NextResponse.json({ patchUploadsDisabled });
+  return NextResponse.json({
+    patchUploadsDisabled: await arePatchUploadsDisabled(),
+    bulkSubmitDisabled: await areBulkSubmitsDisabled(),
+  });
 }

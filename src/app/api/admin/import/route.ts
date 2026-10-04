@@ -12,7 +12,7 @@ import { resolveOrCreateFamily, resolveReleaseFields } from '@/lib/hackFamily';
 import { resolveOrCreateBaseRom } from '@/lib/baseRom';
 import { resolveOrCreateFranchise, FranchiseNameError } from '@/lib/franchise';
 import { resolveOrCreateAuthor, AuthorNameError } from '@/lib/author';
-import { statPatchFile, buildPatchDisplaySlug } from '@/lib/patchStorage';
+import { statPatchFile, buildPatchDisplaySlug, buildPatchRelativePath, type StoredPatchRef } from '@/lib/patchStorage';
 import type { PatchTypeValue } from '@/lib/patchTypes';
 
 const MAX_ENTRIES = 5000;
@@ -65,6 +65,12 @@ const entrySchema = z.object({
   // mounted host directory, independent of the database), not just its
   // declared metadata, and reattach it immediately if so.
   patchStoredSlug: z.string().max(120).optional(),
+  // Where the file sat inside patch storage (folder layout, relative path) —
+  // see Submission.patchStoredPath. Only present for a detailed export made
+  // after the folder layout existed; validated again (resolveRelativePath)
+  // before it ever touches the filesystem, so a hand-edited value can't point
+  // outside the storage directory.
+  patchStoredPath: z.string().max(1024).optional(),
   baseRom: z.object({
     name: z.string().min(1).max(300),
     platform: z.string(), // validated against PLATFORMS at use time; falls back to the entry's own platform if it doesn't match
@@ -262,22 +268,51 @@ export async function POST(req: NextRequest) {
           // on disk, not just its declared type/filename/hash. Patch
           // storage is a bind-mounted host directory, independent of the
           // database (see src/lib/patchStorage.ts) — a database rebuild
-          // alone doesn't lose it. The export carries the exact slug the
-          // ORIGINAL upload stored the file under (patchStoredSlug); fall
-          // back to recomputing one from this entry's own hackName/version
-          // for an export made before that field existed, or a hand-
-          // edited file missing it — best-effort, same spirit as every
-          // other backward-compatible fallback in this importer. Checked
+          // alone doesn't lose it. The export carries the exact location the
+          // ORIGINAL upload stored the file under (patchStoredPath, and the
+          // older patchStoredSlug); fall back to recomputing both from this
+          // entry's own platform / base ROM / hackName / version for an
+          // export made before those fields existed, or a hand-edited file
+          // missing them — best-effort, same spirit as every other
+          // backward-compatible fallback in this importer. Checked
           // here, outside the transaction below, since it's a filesystem
           // call with nothing to roll back. Without this, a re-imported
           // entry would show no patch button at all until someone
           // manually re-uploaded a file that was never actually lost.
-          let patchReattachment: { storedSlug: string; fileSize: number } | null = null;
+          //
+          // Where to look, in order: the exact folder-layout path the export
+          // recorded; where an upload of this entry would be filed today
+          // (computed from its own platform / base ROM / name / version); the
+          // old flat layout. The first one that is really there wins.
+          let patchReattachment: { storedSlug: string; storedPath: string | null; fileSize: number } | null = null;
           if (entry.patchSha1 && entry.patchType) {
+            const sha1Lower = entry.patchSha1.toLowerCase();
+            const patchType = entry.patchType as PatchTypeValue;
             const candidateSlug = entry.patchStoredSlug || buildPatchDisplaySlug(entry.hackName, entry.version);
-            const found = await statPatchFile(entry.patchSha1.toLowerCase(), entry.patchType as PatchTypeValue, candidateSlug);
-            if (found) {
-              patchReattachment = { storedSlug: candidateSlug, fileSize: found.size };
+            const candidates: StoredPatchRef[] = [];
+            if (entry.patchStoredPath) {
+              candidates.push({ sha1: sha1Lower, patchType, storedPath: entry.patchStoredPath, storedSlug: candidateSlug });
+            }
+            candidates.push({
+              sha1: sha1Lower,
+              patchType,
+              storedPath: buildPatchRelativePath({
+                platform,
+                baseRomName: entry.baseRom?.name,
+                hackName: entry.hackName,
+                version: entry.version,
+                sha1: sha1Lower,
+                patchType,
+              }),
+              storedSlug: candidateSlug,
+            });
+            candidates.push({ sha1: sha1Lower, patchType, storedPath: null, storedSlug: candidateSlug });
+            for (const ref of candidates) {
+              const found = await statPatchFile(ref);
+              if (found) {
+                patchReattachment = { storedSlug: candidateSlug, storedPath: ref.storedPath ?? null, fileSize: found.size };
+                break;
+              }
             }
           }
 
@@ -326,6 +361,7 @@ export async function POST(req: NextRequest) {
                 ...(patchReattachment
                   ? {
                       patchStoredSlug: patchReattachment.storedSlug,
+                      patchStoredPath: patchReattachment.storedPath,
                       patchFileSize: patchReattachment.fileSize,
                       patchUploadedAt: new Date(),
                       patchUploadedById: session.user.id,

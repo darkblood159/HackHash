@@ -33,6 +33,9 @@ import { prisma } from './prisma';
 // browser bundle — see patchUploadState.ts's own header comment.
 export { PATCH_UPLOADS_DISABLED_KEY, PATCH_UPLOADS_DISABLED_MESSAGE } from './patchUploadState';
 import { PATCH_UPLOADS_DISABLED_KEY } from './patchUploadState';
+// Same split for the bulk-submit kill switch (see bulkLimits.ts).
+export { BULK_SUBMIT_DISABLED_KEY, BULK_SUBMIT_DISABLED_MESSAGE } from './bulkLimits';
+import { BULK_SUBMIT_DISABLED_KEY } from './bulkLimits';
 
 export async function arePatchUploadsDisabled(): Promise<boolean> {
   try {
@@ -51,5 +54,28 @@ export async function setPatchUploadsDisabled(disabled: boolean, updatedBy?: str
     where: { key: PATCH_UPLOADS_DISABLED_KEY },
     update: { value: String(disabled), updatedBy },
     create: { key: PATCH_UPLOADS_DISABLED_KEY, value: String(disabled), updatedBy },
+  });
+}
+
+// Bulk submit kill switch. Scope, deliberately narrow: it only stops NEW
+// bulk activity — creating a batch, sending a row with a batchId, running
+// the precheck. Submitting versions one at a time is untouched, and so is
+// uploading a patch to an existing submission through the ordinary path
+// (that has its own switch, above). Fails OPEN on a settings-table hiccup
+// for the same reason arePatchUploadsDisabled() does.
+export async function areBulkSubmitsDisabled(): Promise<boolean> {
+  try {
+    const setting = await prisma.siteSetting.findUnique({ where: { key: BULK_SUBMIT_DISABLED_KEY } });
+    return setting?.value === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export async function setBulkSubmitsDisabled(disabled: boolean, updatedBy?: string): Promise<void> {
+  await prisma.siteSetting.upsert({
+    where: { key: BULK_SUBMIT_DISABLED_KEY },
+    update: { value: String(disabled), updatedBy },
+    create: { key: BULK_SUBMIT_DISABLED_KEY, value: String(disabled), updatedBy },
   });
 }

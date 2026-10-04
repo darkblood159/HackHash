@@ -26,6 +26,8 @@ export function HackNameAutocomplete({
   platform,
   placeholder,
   className,
+  disabled,
+  maxLength,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -34,6 +36,9 @@ export function HackNameAutocomplete({
   platform?: string;
   placeholder?: string;
   className: string;
+  /** Optional (the single submit form passes neither of these). */
+  disabled?: boolean;
+  maxLength?: number;
 }) {
   const [suggestions, setSuggestions] = useState<HackFamilySuggestion[]>([]);
   const [open, setOpen] = useState(false);
@@ -114,8 +119,10 @@ export function HackNameAutocomplete({
         onBlur={(e) => onBlur?.(e.target.value)}
         placeholder={placeholder}
         className={className}
+        disabled={disabled}
+        maxLength={maxLength}
       />
-      {open && suggestions.length > 0 && (
+      {open && !disabled && suggestions.length > 0 && (
         <div className="absolute z-20 mt-1.5 w-full rounded-lg border border-phosphor/30 bg-bg-surface shadow-lg shadow-phosphor/5 overflow-hidden">
           <div className="px-3 py-1.5 text-[10px] text-phosphor/70 uppercase tracking-widest border-b border-border-subtle bg-bg-elevated/50">
             Suggestions

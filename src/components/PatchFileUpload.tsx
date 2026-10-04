@@ -41,12 +41,24 @@
 // is WHICH file inside the archive is the patch — auto-picked when
 // unambiguous (pickAutoPatchCandidate, archiveExtract.ts), or left to the
 // person via the PatchArchivePicker component further below when it isn't.
+//
+// LARGE FILES (over CHUNKED_UPLOAD_THRESHOLD_BYTES, patchUploadChunking.ts)
+// do NOT go through the single multipart POST above: Cloudflare caps one
+// proxied request body at 100MB (Free/Pro), so they are sent as many small
+// requests by src/lib/chunkedUpload.ts and finished with one validation call
+// — the server runs the identical checks either way (patchUploadFinalize.ts),
+// so this component's error handling (including the patchTypeMismatch fix
+// button) is the same for both paths. Large files are also not hashed in the
+// browser: nothing here ever used that hash, and hashing needs the whole file
+// in memory, which is exactly what fails at this size (especially on phones).
 import React, { useCallback, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { clsx } from 'clsx';
 import { Upload, FileCheck, AlertCircle, Loader2, ShieldAlert, Trash2, UploadCloud, ListChecks } from 'lucide-react';
 import { patchTypeFromFilename, patchTypeLabel, sha1Hex, HashingUnavailableError } from '@/lib/patchTypes';
 import { PATCH_UPLOADS_DISABLED_MESSAGE } from '@/lib/patchUploadState';
+import { CHUNKED_UPLOAD_THRESHOLD_BYTES } from '@/lib/patchUploadChunking';
+import { uploadFileChunked, discardSavedUpload, type ChunkedUploadProgress } from '@/lib/chunkedUpload';
 import {
   classifyArchive, readZipCandidates, read7zCandidates, readGzipFile, pickAutoPatchCandidate,
   type ArchiveCandidate,
@@ -62,7 +74,9 @@ function formatBytes(bytes: number): string {
 
 interface Staged {
   file: File;
-  sha1: string;
+  // null for files above CHUNKED_UPLOAD_THRESHOLD_BYTES, which are
+  // deliberately not hashed in the browser (see the header comment).
+  sha1: string | null;
   guessedType: string | null;
   // Set when this file was extracted from an archive rather than dropped
   // directly — shown in the staged card ("extracted from X.zip") same as
@@ -207,6 +221,11 @@ export function PatchFileUpload({
   const [archivePhase, setArchivePhase] = useState<'reading' | 'extracting' | null>(null);
   const [archiveProgress, setArchiveProgress] = useState<number | null>(null);
   const [pendingArchive, setPendingArchive] = useState<PendingPatchArchive | null>(null);
+  // Non-null only while a chunked upload is running — drives the progress
+  // bar, and is what turns Cancel from "discard the staged file" into "stop
+  // the transfer" (abortRef is that transfer's AbortController).
+  const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const stageFile = useCallback(async (file: File, sourceArchiveName?: string) => {
@@ -214,7 +233,7 @@ export function PatchFileUpload({
     setMismatch(null);
     setBusy(true);
     try {
-      const sha1 = await sha1Hex(file);
+      const sha1 = file.size > CHUNKED_UPLOAD_THRESHOLD_BYTES ? null : await sha1Hex(file);
       setStaged({ file, sha1, guessedType: patchTypeFromFilename(file.name), sourceArchiveName });
     } catch (err) {
       // Logged, not just swallowed — a generic on-screen message is fine
@@ -372,6 +391,39 @@ export function PatchFileUpload({
     setError(null);
     setMismatch(null);
     try {
+      if (staged.file.size > CHUNKED_UPLOAD_THRESHOLD_BYTES) {
+        const controller = new AbortController();
+        abortRef.current = controller;
+        setProgress({ sent: 0, total: staged.file.size });
+        const result = await uploadFileChunked({
+          submissionId,
+          file: staged.file,
+          onProgress: setProgress,
+          signal: controller.signal,
+        });
+        if (result.ok) {
+          setStaged(null);
+          router.refresh();
+          return;
+        }
+        if (result.cancelled) return; // cancelStaged() owns the state reset
+        setError(result.message);
+        if (result.uncertain) {
+          // The server may have finished after the connection gave up on it —
+          // drop the staged file and re-fetch rather than leave a stale
+          // "Confirm upload" card next to a file that may already be attached.
+          setStaged(null);
+          router.refresh();
+          return;
+        }
+        // Same structured mismatch the single-request path reports — drives
+        // the "Use {detectedType} instead" button; retrying then resumes the
+        // kept upload at the finish step instead of re-sending the file.
+        const mm = result.data?.patchTypeMismatch as PatchTypeMismatch | undefined;
+        if (mm?.declaredType && mm?.detectedType) setMismatch(mm);
+        return;
+      }
+
       const formData = new FormData();
       formData.append('file', staged.file);
       const res = await fetch(`/api/submissions/${submissionId}/patch`, {
@@ -396,9 +448,22 @@ export function PatchFileUpload({
     } catch {
       setError('Upload failed — please check your connection and try again.');
     } finally {
+      abortRef.current = null;
+      setProgress(null);
       setBusy(false);
     }
   }, [staged, submissionId, router]);
+
+  // Cancel for the staged card. Mid-transfer it stops the upload; either way
+  // it tells the server to drop whatever it has kept for this submission (a
+  // partial upload, or one held for a retry after a type mismatch) so a
+  // discarded multi-GB file doesn't sit on the server's disk until the
+  // 24-hour sweep. Best effort — discardSavedUpload never throws.
+  const cancelStaged = useCallback(() => {
+    abortRef.current?.abort();
+    setStaged(null);
+    void discardSavedUpload(submissionId);
+  }, [submissionId]);
 
   // Fixes the exact mismatch the upload route just reported by correcting
   // the submission's OWN declared patchType to whatever the file's real
@@ -550,6 +615,26 @@ export function PatchFileUpload({
           {staged.sourceArchiveName && (
             <p className="text-[10px] text-text-muted pl-[18px]">extracted from {staged.sourceArchiveName}</p>
           )}
+          {staged.file.size > CHUNKED_UPLOAD_THRESHOLD_BYTES && (
+            <p className="text-[10px] text-text-muted pl-[18px]">
+              {formatBytes(staged.file.size)} — large file, uploaded in parts. If the connection drops, pick the
+              same file again to continue where it stopped.
+            </p>
+          )}
+          {progress && (
+            <div className="space-y-1 pl-[18px]">
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg-surface">
+                <div
+                  className="h-full bg-phosphor transition-[width] duration-200"
+                  style={{ width: `${Math.min(100, Math.floor((progress.sent / progress.total) * 100))}%` }}
+                />
+              </div>
+              <p className="font-mono text-[10px] text-text-muted">
+                {formatBytes(progress.sent)} of {formatBytes(progress.total)} —{' '}
+                {Math.min(100, Math.floor((progress.sent / progress.total) * 100))}%
+              </p>
+            </div>
+          )}
           <div className="flex gap-2">
             <button
               onClick={upload}
@@ -559,11 +644,11 @@ export function PatchFileUpload({
               {busy ? 'Uploading…' : hasFile ? 'Confirm replace' : 'Confirm upload'}
             </button>
             <button
-              onClick={() => setStaged(null)}
-              disabled={busy}
+              onClick={cancelStaged}
+              disabled={busy && !progress}
               className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-bg-surface disabled:opacity-50"
             >
-              Cancel
+              {progress ? 'Cancel upload' : 'Cancel'}
             </button>
           </div>
         </div>

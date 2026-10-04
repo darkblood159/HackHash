@@ -47,10 +47,36 @@ class ByteReader {
   seek(n: number): void {
     this.offset = n;
   }
+  // Forward-only and in bounds — the reader must never move backward. A
+  // BPS patch's metadata length is read from the file itself, and before this
+  // check a value that decoded NEGATIVE (see readVLV) moved the reader
+  // backward, so the "advance until the end of the actions" loops in applyBPS
+  // never finished. `!(n >= 0)` also rejects NaN.
   skip(n: number): void {
+    if (!(n >= 0) || this.offset + n > this.bytes.length) {
+      throw new PatchApplyError('The patch file ends unexpectedly — it may be truncated or corrupt.');
+    }
     this.offset += n;
   }
+  // Throws at the end of the data instead of returning `undefined` (which
+  // is what indexing past a typed array gives). Every reader built on this —
+  // readVLV's `while (true)` above all — used to spin FOREVER on a truncated
+  // patch, since `undefined & 0x80` is never truthy and the loop had no other
+  // way out; a patch that is just the 4-byte "UPS1"/"BPS1" magic froze the
+  // browser tab. Valid patches never read past their own end, so this only
+  // changes what a malformed file does: fail with a message. (Found while
+  // building bulk-submit's automatic patch check, which applies patches the
+  // person dropped without a click per file — but it equally affected the
+  // ordinary "apply patch" button on an already-uploaded patch.)
+  //
+  // That was the first of two hang fixes. The second (readVLV, skip, readBytes
+  // and the BPS decode below, Oct 1 2026) closed the other way a patch could
+  // keep the loops from finishing: making the reader move BACKWARD, which this
+  // end-of-data check can never notice.
   readU8(): number {
+    if (this.offset >= this.bytes.length) {
+      throw new PatchApplyError('The patch file ends unexpectedly — it may be truncated or corrupt.');
+    }
     return this.bytes[this.offset++];
   }
   // Big-endian, 3-byte — IPS's own offset/length field width.
@@ -75,6 +101,14 @@ class ByteReader {
     return v;
   }
   readBytes(len: number): Uint8Array {
+    // Same forward-only, in-bounds rule as skip() — and for the same reason:
+    // a decoded length that went negative moved the reader backward here
+    // (`offset += len`), re-reading bytes it had already consumed, forever.
+    // Valid patches never ask for bytes past their own end, so this only
+    // changes what a malformed file does: fail with a message.
+    if (!(len >= 0) || this.offset + len > this.bytes.length) {
+      throw new PatchApplyError('The patch file ends unexpectedly — it may be truncated or corrupt.');
+    }
     // .slice(), not .subarray() — an owned copy, not a view that would
     // alias the original patch buffer if it's ever mutated or GC'd
     // separately.
@@ -85,6 +119,22 @@ class ByteReader {
   // BPS and UPS both use the same 7-bit variable-length value encoding
   // for offsets/lengths/sizes (the source romhacking.net format specs
   // define it identically in both documents) — one shared reader.
+  //
+  // Hardened Oct 1 2026 after a structure-aware fuzz found patches of ~27 bytes
+  // that kept a tab spinning for over a minute. What was wrong, precisely —
+  // three separate defects that fed one failure (the pre-fix decoder was
+  // CORRECT for every value below 2^35, i.e. for every number a real patch
+  // contains; all of this is about hostile input):
+  //   1. `shift <<= 7` is a 32-bit operation in JavaScript: from the 6th byte
+  //      on the shift is stuck at 0, so long numbers decoded to wrong values.
+  //      Floating-point multiplication is exact below 2^53 and does not wrap.
+  //   2. Nothing bounded the value. No real patch contains a number anywhere
+  //      near MAX_VLV_VALUE (sizes are capped at MAX_OUTPUT_BYTES, action words
+  //      are at most 4x that, offsets at most 2x), so anything larger is
+  //      corruption and is refused instead of being trusted as a length.
+  //   3. (in applyBPS, not here) `data & 3` / `data >> 2` convert to a signed
+  //      32-bit integer first, so an action word of 2^31 or more — reachable
+  //      with just 5 bytes — became a NEGATIVE length. See applyBPS.
   readVLV(): number {
     let data = 0;
     let shift = 1;
@@ -92,8 +142,11 @@ class ByteReader {
     while (true) {
       const x = this.readU8();
       data += (x & 0x7f) * shift;
+      if (data > MAX_VLV_VALUE) {
+        throw new PatchApplyError('This patch contains an implausibly large number, so it is probably corrupt.');
+      }
       if (x & 0x80) break;
-      shift <<= 7;
+      shift *= 128; // NOT `shift <<= 7` — see above
       data += shift;
     }
     return data;
@@ -101,6 +154,18 @@ class ByteReader {
 }
 
 export class PatchApplyError extends Error {}
+
+// A patch declares how big its output is; a corrupt or hostile one can claim
+// an absurd size and make the browser try to allocate it. No ROM this
+// in-browser applier supports (IPS/BPS/UPS — cartridge-era systems) comes
+// near this, and 512 MiB is comfortably below where a tab gives up.
+const MAX_OUTPUT_BYTES = 512 * 1024 * 1024;
+
+// The largest variable-length number any real BPS/UPS patch can contain.
+// Generous on purpose (2^40 = 1 TiB; the real maximum is a few GiB) — this is
+// a corruption tripwire, not a tight limit — and far below 2^53, so every
+// value that passes is represented exactly as a JavaScript number.
+const MAX_VLV_VALUE = 2 ** 40;
 
 function applyIPS(patchBytes: Uint8Array, romBytes: Uint8Array): Uint8Array {
   const r = new ByteReader(patchBytes, 5); // skip 'PATCH'
@@ -167,6 +232,9 @@ function applyUPS(patchBytes: Uint8Array, romBytes: Uint8Array): Uint8Array {
 
   const sizeInputDeclared = r.readVLV();
   const sizeOutputDeclared = r.readVLV();
+  if (sizeOutputDeclared > MAX_OUTPUT_BYTES) {
+    throw new PatchApplyError('This patch declares an implausibly large output, so it is probably corrupt.');
+  }
 
   interface UpsRecord {
     offset: number;
@@ -237,6 +305,9 @@ function applyBPS(patchBytes: Uint8Array, romBytes: Uint8Array): Uint8Array {
 
   r.readVLV(); // sourceSize — not needed for apply; targetSize is what actually sizes the output
   const targetSize = r.readVLV();
+  if (targetSize > MAX_OUTPUT_BYTES) {
+    throw new PatchApplyError('This patch declares an implausibly large output, so it is probably corrupt.');
+  }
   const metaDataLength = r.readVLV();
   if (metaDataLength) r.skip(metaDataLength);
 
@@ -248,16 +319,28 @@ function applyBPS(patchBytes: Uint8Array, romBytes: Uint8Array): Uint8Array {
   }
   const actions: BpsAction[] = [];
   const endActionsOffset = patchBytes.length - 12; // 3x u32 checksums at the end
+  let produced = 0;
   while (r.offset < endActionsOffset) {
     const data = r.readVLV();
-    const type = data & 3;
-    const length = (data >> 2) + 1;
+    // Arithmetic, not `data & 3` / `data >> 2`: those convert to a 32-bit
+    // signed integer first, so a decoded value of 2^31 or more became NEGATIVE
+    // and produced a negative action length (the reader then moved backward).
+    // With the bounded VLV above, `length` here is always >= 1.
+    const type = data % 4;
+    const length = Math.floor(data / 4) + 1;
+    // A valid BPS's actions add up to exactly its declared output size. One
+    // that claims more is corrupt — and would otherwise be carried out one
+    // byte at a time for however many billions the length field says.
+    produced += length;
+    if (produced > targetSize) {
+      throw new PatchApplyError('This patch is malformed — its instructions run past its own declared size.');
+    }
     const action: BpsAction = { type, length };
     if (type === BPS_TARGET_READ) {
       action.bytes = r.readBytes(length);
     } else if (type === BPS_SOURCE_COPY || type === BPS_TARGET_COPY) {
       const raw = r.readVLV();
-      action.relativeOffset = (raw & 1 ? -1 : 1) * (raw >> 1);
+      action.relativeOffset = (raw % 2 === 1 ? -1 : 1) * Math.floor(raw / 2);
     }
     actions.push(action);
   }

@@ -4,7 +4,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { type HasheousEnv } from '@/lib/hasheous';
-import { pullMappingForSubmission } from '@/lib/hasheousSync';
+import { pullMappingForSubmission, NEEDS_FIRST_SYNC_CLAUSES } from '@/lib/hasheousSync';
 import { jobStore } from '@/lib/jobStore';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
@@ -42,23 +42,18 @@ export async function POST(req: NextRequest) {
     ...(submissionIds?.length ? { id: { in: submissionIds } } : {}),
   };
 
-  if (onlyMissing && skipSynced) {
-    // Most common case: skip anything already confirmed synced OR with no
-    // mapping at all (no point trying things we've already found + things
-    // we've already confirmed don't exist in Hasheous).
-    // "Not synced" means: no GameMapping yet, OR mapping exists but sync
-    // hasn't succeeded.
-    where.OR = [
-      { gameMappingId: null },
-      { gameMapping: { hasheousSyncStatus: { not: 'ok' } } },
-    ];
+  if (skipSynced && onlyMissing) {
+    // Most common case: skip anything already successfully pulled.
+    // "Not synced" is NEEDS_FIRST_SYNC_CLAUSES (hasheousSync.ts) — the single
+    // definition shared with the background scheduler. It used to be a local
+    // `{ hasheousSyncStatus: { not: 'ok' } }` here, which silently skipped
+    // every hand-entered mapping (status NULL), so a bulk pull could never
+    // reach them either.
+    where.OR = NEEDS_FIRST_SYNC_CLAUSES;
   } else if (onlyMissing) {
     where.gameMappingId = null;
   } else if (skipSynced) {
-    where.OR = [
-      { gameMappingId: null },
-      { gameMapping: { hasheousSyncStatus: { not: 'ok' } } },
-    ];
+    where.OR = NEEDS_FIRST_SYNC_CLAUSES;
   }
   // if neither onlyMissing nor skipSynced, process everything (no extra filter)
 
@@ -116,10 +111,15 @@ async function runPullJob({
         const oneResult = await pullMappingForSubmission(sub, hasheousEnv, overwrite);
 
         if (oneResult.error) {
+          // The lookup FAILED (timeout / rate limit / Hasheous error) — that
+          // is not the same as Hasheous not knowing the hash. Still listed in
+          // the same tab (the job summary has no separate counter), but with
+          // the reason attached so a run that hit an outage is recognisable
+          // instead of looking like hundreds of genuine misses.
           jobStore.update(jobId, (j) => {
             j.processed++;
             j.notFound++;
-            j.notFoundResults.push({ id: sub.id, hackName: sub.hackName, sha1: sub.sha1 });
+            j.notFoundResults.push({ id: sub.id, hackName: sub.hackName, sha1: sub.sha1, error: oneResult.error });
           });
           processed++;
           continue;

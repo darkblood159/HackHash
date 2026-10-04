@@ -18,7 +18,7 @@
 // (including who submitted each one and who uploaded its patch), verification
 // votes, trust-score history, comments, tags, hack families + their
 // dismissed-duplicate decisions, base ROMs, alternate formats, duplicate
-// reports, screenshots, DAT import history, pending/reviewed change
+// reports, screenshots, DAT import history, bulk-submit batches, pending/reviewed change
 // requests, and site settings.
 //
 // WHAT'S DELIBERATELY EXCLUDED, AND WHY:
@@ -65,8 +65,7 @@
 // downgrades any that don't — see that function's own comment for why.
 
 import { prisma } from './prisma';
-import { statPatchFileStrict } from './patchStorage';
-import type { PatchTypeValue } from './patchTypes';
+import { statPatchFileStrict, storedPatchRef } from './patchStorage';
 
 export const FULL_BACKUP_FORMAT_VERSION = 1;
 
@@ -151,6 +150,7 @@ export async function generateFullBackup(
     franchises,
     authors,
     datImports,
+    submissionBatches,
     submissions,
     changeRequests,
     approvedEntries,
@@ -173,6 +173,7 @@ export async function generateFullBackup(
     prisma.franchise.findMany(),
     prisma.author.findMany(),
     prisma.datImport.findMany(),
+    prisma.submissionBatch.findMany(),
     prisma.submission.findMany(),
     prisma.changeRequest.findMany(),
     prisma.approvedEntry.findMany(),
@@ -211,6 +212,7 @@ export async function generateFullBackup(
     franchises: franchises,
     authors: authors,
     datImports: datImports,
+    submissionBatches: submissionBatches,
     submissions: submissions.map((s) => ({ ...s, fileSize: s.fileSize.toString() })),
     changeRequests: changeRequests,
     approvedEntries: approvedEntries.map((e) => ({ ...e, fileSize: e.fileSize.toString() })),
@@ -262,6 +264,9 @@ const RESTORE_ORDER = [
   // Before 'submissions' too — Submission.authorId is a foreign key to this.
   'authors',
   'datImports',
+  // Before 'submissions' too — Submission.batchId is a foreign key to this.
+  // (WIPE_ORDER is this list reversed, so submissions are deleted first.)
+  'submissionBatches',
   'submissions',
   // After 'submissions' and 'users' — ChangeRequest.submissionId and
   // .requestedById are both foreign keys to those, and (unlike most FKs in
@@ -300,7 +305,8 @@ const WIPE_ORDER = [...RESTORE_ORDER].reverse();
 // franchise-less backup already makes for franchises.
 // 'authors' is optional for the same reason 'franchises' is: a backup taken before the Author
 // list shipped has no "authors" key, and that's a complete, valid backup of the schema as it was then.
-const OPTIONAL_TABLES = ['franchises', 'authors', 'changeRequests'] as const;
+// 'submissionBatches' likewise: a backup taken before bulk submit shipped has no such key.
+const OPTIONAL_TABLES = ['franchises', 'authors', 'submissionBatches', 'changeRequests'] as const;
 
 // tx.model.deleteMany({}) for a table name that isn't a Prisma delegate
 // (there isn't one — this list is hand-matched 1:1 against RESTORE_ORDER
@@ -316,6 +322,7 @@ const MODEL_FOR_KEY: Record<string, string> = {
   franchises: 'franchise',
   authors: 'author',
   datImports: 'datImport',
+  submissionBatches: 'submissionBatch',
   submissions: 'submission',
   changeRequests: 'changeRequest',
   approvedEntries: 'approvedEntry',
@@ -386,11 +393,16 @@ const ROW_MAPPERS: Record<string, (r: any) => any> = {
   franchises: (f) => ({ ...f, approvedAt: parseDate(f.approvedAt), createdAt: parseDateReq(f.createdAt) }),
   authors: (a) => ({ ...a, approvedAt: parseDate(a.approvedAt), createdAt: parseDateReq(a.createdAt) }),
   datImports: (d) => ({ ...d, reversedAt: parseDate(d.reversedAt), createdAt: parseDateReq(d.createdAt) }),
+  submissionBatches: (b) => ({ ...b, reversedAt: parseDate(b.reversedAt), createdAt: parseDateReq(b.createdAt) }),
   submissions: (s) => ({
     ...s,
     fileSize: bi(s.fileSize),
     releaseDate: parseDate(s.releaseDate),
     patchUploadedAt: parseDate(s.patchUploadedAt),
+    // Added with the Hasheous pull rotation. parseDate(undefined) is null, so
+    // a backup taken before this column existed restores fine (every row just
+    // becomes "never checked", which the scheduler treats as due).
+    hasheousCheckedAt: parseDate(s.hasheousCheckedAt),
     createdAt: parseDateReq(s.createdAt),
     updatedAt: parseDateReq(s.updatedAt),
     deletedAt: parseDate(s.deletedAt),
@@ -525,8 +537,8 @@ export async function restoreFullBackup(payload: unknown): Promise<RestoreResult
   return { wiped, restored, patchesUnavailable, patchesInconclusive };
 }
 
-// After a restore, every submission's patchUploadedAt/patchStoredSlug/
-// patchSha1/patchType came back exactly as backed up — unlike the DAT
+// After a restore, every submission's patchUploadedAt/patchStoredPath/
+// patchStoredSlug/patchSha1/patchType came back exactly as backed up — unlike the DAT
 // detailed-export re-import (see admin/import/route.ts), nothing here was
 // re-derived or guessed at. That's correct IF the physical file is still
 // sitting in patch storage (a separate bind-mounted directory the database
@@ -537,7 +549,7 @@ export async function restoreFullBackup(payload: unknown): Promise<RestoreResult
 // clicks it — this checks every one against disk and downgrades any that
 // are DEFINITIVELY missing back to "declared but not uploaded" (patchType/
 // patchSha1/patchFilename left alone; patchUploadedAt/patchUploadedById/
-// patchFileSize/patchStoredSlug cleared), the same state a submission that
+// patchFileSize/patchStoredSlug/patchStoredPath cleared), the same state a submission that
 // never had a patch uploaded is already in.
 //
 // Uses statPatchFileStrict, not statPatchFile — a plain "couldn't confirm
@@ -560,7 +572,7 @@ export async function restoreFullBackup(payload: unknown): Promise<RestoreResult
 async function verifyAndFixPatchState(): Promise<{ patchesUnavailable: number; patchesInconclusive: number }> {
   const candidates = await prisma.submission.findMany({
     where: { patchUploadedAt: { not: null } },
-    select: { id: true, patchSha1: true, patchType: true, patchStoredSlug: true },
+    select: { id: true, patchSha1: true, patchType: true, patchStoredSlug: true, patchStoredPath: true },
   });
 
   const missingIds: string[] = [];
@@ -577,11 +589,11 @@ async function verifyAndFixPatchState(): Promise<{ patchesUnavailable: number; p
           missingIds.push(c.id);
           return;
         }
-        const result = await statPatchFileStrict(
-          c.patchSha1.toLowerCase(),
-          c.patchType as PatchTypeValue,
-          c.patchStoredSlug || 'patch'
-        );
+        // A backup from before the folder layout has patchStoredPath unset,
+        // which storedPatchRef turns into the old flat-layout lookup; a
+        // stored path that fails validation comes back as 'error' (left
+        // untouched), never 'not-found'.
+        const result = await statPatchFileStrict(storedPatchRef(c));
         if (result.status === 'not-found') missingIds.push(c.id);
         else if (result.status === 'error') {
           inconclusive++;
@@ -594,7 +606,13 @@ async function verifyAndFixPatchState(): Promise<{ patchesUnavailable: number; p
   if (missingIds.length > 0) {
     await prisma.submission.updateMany({
       where: { id: { in: missingIds } },
-      data: { patchUploadedAt: null, patchUploadedById: null, patchFileSize: null, patchStoredSlug: null },
+      data: {
+        patchUploadedAt: null,
+        patchUploadedById: null,
+        patchFileSize: null,
+        patchStoredSlug: null,
+        patchStoredPath: null,
+      },
     });
   }
 

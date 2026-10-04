@@ -11,7 +11,7 @@ import { ScoreGauge } from '@/components/ui/ScoreGauge';
 import { TrustBadge } from '@/components/ui/TrustBadge';
 import { Avatar } from '@/components/ui/Avatar';
 import { formatDistanceToNow, format } from 'date-fns';
-import { ExternalLink, Github, FileText, ChevronDown, Search, Plus } from 'lucide-react';
+import { ExternalLink, Github, FileText, ChevronDown, Search, Plus, ListPlus } from 'lucide-react';
 import Link from 'next/link';
 import { VerifyPanel } from '@/components/VerifyPanel';
 import { AdminActions } from '@/components/AdminActions';
@@ -313,6 +313,14 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border border-dashed border-phosphor/40 text-phosphor hover:bg-phosphor/10 transition-colors"
         >
           <Plus size={12} /> Add new version
+        </Link>
+        {/* The same prefill, for adding SEVERAL versions (and their patches) in
+            one go — see src/components/bulk/BulkSubmitForm.tsx. */}
+        <Link
+          href={`/submit/bulk?fromSubmission=${submission.id}`}
+          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border border-dashed border-phosphor/40 text-phosphor hover:bg-phosphor/10 transition-colors"
+        >
+          <ListPlus size={12} /> Add several versions
         </Link>
       </div>
 

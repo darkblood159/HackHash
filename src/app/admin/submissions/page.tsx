@@ -18,8 +18,13 @@ export const dynamic = 'force-dynamic';
 const STATUSES = ['PENDING', 'COMMUNITY_VERIFIED', 'RECOMMENDED', 'APPROVED', 'REJECTED', 'DISPUTED'];
 const PER_PAGE = 50;
 
-export default async function AdminSubmissionsPage({ searchParams }: { searchParams: { status?: string; platform?: string; page?: string; deleted?: string } }) {
+export default async function AdminSubmissionsPage({ searchParams }: { searchParams: { status?: string; platform?: string; page?: string; deleted?: string; batchId?: string } }) {
   const deletedOnly = searchParams.deleted === 'true';
+  // Linked from /admin/batches ("View entries"): shows just the entries one
+  // bulk-submit batch created, any status. Its own mode like deletedOnly — the
+  // status/platform pills are hidden rather than rebuilt, since they'd drop
+  // the batch filter when clicked.
+  const batchId = !deletedOnly && searchParams.batchId && searchParams.batchId.length <= 64 ? searchParams.batchId : undefined;
 
   // IMPORTANT: do NOT default this to 'PENDING'. An absent status param means
   // "All" was selected (SubmissionFilters deletes the param for that case) —
@@ -37,6 +42,8 @@ export default async function AdminSubmissionsPage({ searchParams }: { searchPar
   // filter — deletedAt: null is unconditional there.
   const where: Prisma.SubmissionWhereInput = deletedOnly
     ? { deletedAt: { not: null } }
+    : batchId
+    ? { deletedAt: null, batchId }
     : {
         deletedAt: null,
         ...(status ? { status: status as any } : {}),
@@ -61,6 +68,7 @@ export default async function AdminSubmissionsPage({ searchParams }: { searchPar
   const buildPageLink = (p: number) => {
     const params = new URLSearchParams();
     if (deletedOnly) { params.set('deleted', 'true'); }
+    else if (batchId) { params.set('batchId', batchId); }
     else {
       if (status) params.set('status', status);
       if (platform) params.set('platform', platform);
@@ -74,19 +82,19 @@ export default async function AdminSubmissionsPage({ searchParams }: { searchPar
       <div className="flex flex-col gap-3 mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <p className="text-sm text-text-muted">
-            {total} submission(s){deletedOnly ? ' (deleted)' : ' sorted by verification score'}
+            {total} submission(s){deletedOnly ? ' (deleted)' : batchId ? ' in this bulk batch' : ' sorted by verification score'}
           </p>
           <div className="flex items-center gap-3">
-            {!deletedOnly && <SubmissionFilters current={status} />}
+            {!deletedOnly && !batchId && <SubmissionFilters current={status} />}
             <Link
-              href={deletedOnly ? '/admin/submissions' : '/admin/submissions?deleted=true'}
-              className={`text-xs px-2.5 py-1 rounded-md border ${deletedOnly ? 'border-phosphor/40 text-phosphor bg-phosphor/10' : 'border-border text-text-muted hover:text-phosphor'}`}
+              href={deletedOnly || batchId ? '/admin/submissions' : '/admin/submissions?deleted=true'}
+              className={`text-xs px-2.5 py-1 rounded-md border ${deletedOnly || batchId ? 'border-phosphor/40 text-phosphor bg-phosphor/10' : 'border-border text-text-muted hover:text-phosphor'}`}
             >
-              {deletedOnly ? '← Back to queue' : 'Deleted'}
+              {deletedOnly || batchId ? '← Back to queue' : 'Deleted'}
             </Link>
           </div>
         </div>
-        {!deletedOnly && <PlatformFilters current={platform} />}
+        {!deletedOnly && !batchId && <PlatformFilters current={platform} />}
       </div>
 
       {submissions.length === 0 && (

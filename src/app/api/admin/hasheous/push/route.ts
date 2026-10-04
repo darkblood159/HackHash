@@ -104,14 +104,17 @@ export async function POST(req: NextRequest) {
       hasheousEnv
     );
 
-    await prisma.gameMapping.update({
-      where: { id: m.id },
-      data: {
-        hasheousSyncedAt: new Date(),
-        hasheousSyncStatus: result.ok ? 'ok' : 'error',
-        hasheousSyncError: result.error ?? null,
-      },
-    });
+    // This route used to also stamp hasheousSyncedAt / hasheousSyncStatus
+    // ('ok' on success, 'error' on failure) / hasheousSyncError here. Those
+    // are the PULL-tracking fields ("do we have Hasheous's data for this
+    // hash"), and a push says nothing about that — pushing only SENDS our
+    // ids. The effect: a hand-entered mapping that had never been pulled got
+    // marked 'ok' by a successful push, which excluded it from every future
+    // pull (scheduler and bulk pull both skip 'ok'), so it never got a
+    // Hasheous id and kept looking "not found". The scheduler's own
+    // auto-push and the approval-time push never wrote these; this brings the
+    // manual push in line. Push outcome is tracked by recordAcceptedPushResult
+    // (below) and the HASHEOUS_PUSH_OK / HASHEOUS_PUSH_ERROR audit entry.
 
     if (result.ok) {
       await recordAcceptedPushResult(m.id, sentMappings as any, result);

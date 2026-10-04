@@ -4,6 +4,7 @@ import { prisma } from '@/lib/prisma';
 import { Download, AlertTriangle } from 'lucide-react';
 import { BackupRestoreForm } from '@/components/BackupRestoreForm';
 import { PatchReconcileButton } from '@/components/PatchReconcileButton';
+import { PatchOrganizeButton } from '@/components/PatchOrganizeButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -62,6 +63,22 @@ export default async function AdminBackupPage() {
           bind-mounted host directory), which survives a database rebuild on its own. This is the database
           only. If patch storage isn't backed up some other way, it's worth doing that separately too.
         </p>
+      </div>
+
+      <div className="border border-border rounded-lg p-6 bg-bg-elevated/50">
+        <h2 className="font-display text-sm font-bold text-text-secondary uppercase tracking-wide mb-2">
+          Organize patch files
+        </h2>
+        <p className="text-sm text-text-secondary mb-2 max-w-xl">
+          New uploads are filed as <span className="font-mono text-text-primary">Platform / Base ROM / Hack / file</span>.
+          This moves patches uploaded before that into the same folders, and re-files any whose hack or base ROM has
+          been renamed since. <span className="text-text-primary">Preview</span> first — it changes nothing.
+        </p>
+        <p className="text-xs text-text-secondary mb-4 max-w-xl">
+          Safe to run any time and to repeat: files are never overwritten, a patch whose file can't be found is left
+          alone and listed, and downloads keep working throughout.
+        </p>
+        <PatchOrganizeButton />
       </div>
 
       <div className="border border-status-pending/30 rounded-lg p-6 bg-status-pending/5">

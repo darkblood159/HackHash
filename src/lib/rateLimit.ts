@@ -1,7 +1,8 @@
 // src/lib/rateLimit.ts
 //
 // Rate limiting for POST /api/submissions, POST+DELETE
-// /api/submissions/[id]/verify, POST /api/submissions/[id]/patch, and GET
+// /api/submissions/[id]/verify, POST /api/submissions/[id]/patch (plus the
+// chunked upload endpoints under /patch/uploads), and GET
 // /api/search — Upstash Redis (REST,
 // not a TCP connection — works fine from behind Nginx Proxy Manager +
 // Cloudflare with nothing extra to open) via @upstash/ratelimit.
@@ -45,6 +46,10 @@ const g = globalThis as unknown as {
     verify: Ratelimit;
     search: Ratelimit;
     patchUpload: Ratelimit;
+    patchChunk: Ratelimit;
+    bulkSubmissions: Ratelimit;
+    bulkPatchUpload: Ratelimit;
+    bulkPrecheck: Ratelimit;
   } | null;
 };
 
@@ -86,6 +91,55 @@ const limiters =
           limiter: Ratelimit.slidingWindow(10, '10 m'),
           analytics: true,
           prefix: 'ratelimit:patch-upload',
+        }),
+        // Everything a chunked patch upload does AFTER it has started: each
+        // chunk, the resume/status check, the finish call, and abort. Split
+        // from patchUpload above on purpose — that bucket is one token per
+        // upload STARTED (10 per 10 minutes), which a single 2GB upload's
+        // ~40 chunk requests would exhaust by themselves. Keyed by user id
+        // like the others. 400 per 10 minutes covers several maximum-size
+        // uploads including retries and resumes (the start limit is what
+        // actually bounds how many uploads can begin), while still stopping
+        // a script hammering the endpoint; every request also has to name a
+        // live session belonging to that user, so this is a backstop, not the
+        // primary control.
+        patchChunk: new Ratelimit({
+          redis,
+          limiter: Ratelimit.slidingWindow(400, '10 m'),
+          analytics: true,
+          prefix: 'ratelimit:patch-chunk',
+        }),
+        // The three bulk-submit limiters (src/lib/bulkLimits.ts describes the
+        // feature). SEPARATE limiters, not a raised global one: the ordinary
+        // 10-per-10-minutes above stays exactly as strict for everyone
+        // submitting one at a time. A request only counts against these
+        // when it carries a batch id that the route has already verified
+        // belongs to the caller and is still open (see submissionBatch.ts),
+        // so they can't be reached by simply claiming to be a bulk request.
+        // Same 30-per-10-minutes starting point for all three — enough for a
+        // full batch (the row cap is 25, enforced from the database) plus a
+        // few retries, still bounded. Not a researched number.
+        bulkSubmissions: new Ratelimit({
+          redis,
+          limiter: Ratelimit.slidingWindow(30, '10 m'),
+          analytics: true,
+          prefix: 'ratelimit:bulk-submissions',
+        }),
+        bulkPatchUpload: new Ratelimit({
+          redis,
+          limiter: Ratelimit.slidingWindow(30, '10 m'),
+          analytics: true,
+          prefix: 'ratelimit:bulk-patch-upload',
+        }),
+        // The dry-run check runs a few indexed lookups per call and is
+        // re-run (debounced) as the person edits version labels, so it gets
+        // its own, roomier bucket rather than eating into the budget for
+        // actually creating rows.
+        bulkPrecheck: new Ratelimit({
+          redis,
+          limiter: Ratelimit.slidingWindow(60, '10 m'),
+          analytics: true,
+          prefix: 'ratelimit:bulk-precheck',
         }),
         // Same reasoning as submissions (auth-gated already, key by user id
         // not IP) — but a verify/vote action is cheaper and a genuinely
@@ -147,6 +201,22 @@ export function checkSearchRateLimit(identifier: string): Promise<RateLimitResul
 
 export function checkPatchUploadRateLimit(identifier: string): Promise<RateLimitResult> {
   return check(limiters?.patchUpload, identifier);
+}
+
+export function checkPatchChunkRateLimit(identifier: string): Promise<RateLimitResult> {
+  return check(limiters?.patchChunk, identifier);
+}
+
+export function checkBulkSubmissionsRateLimit(identifier: string): Promise<RateLimitResult> {
+  return check(limiters?.bulkSubmissions, identifier);
+}
+
+export function checkBulkPatchUploadRateLimit(identifier: string): Promise<RateLimitResult> {
+  return check(limiters?.bulkPatchUpload, identifier);
+}
+
+export function checkBulkPrecheckRateLimit(identifier: string): Promise<RateLimitResult> {
+  return check(limiters?.bulkPrecheck, identifier);
 }
 
 /**

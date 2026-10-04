@@ -36,7 +36,14 @@
 // directly visible in the result rather than something to take on faith.
 
 import { prisma } from './prisma';
-import { statPatchFileStrict, buildPatchDisplaySlug, resolveStoredPath } from './patchStorage';
+import {
+  statPatchFileStrict,
+  buildPatchDisplaySlug,
+  buildPatchRelativePath,
+  resolveStoredPath,
+  type StoredPatchRef,
+  type PatchFileCheckResult,
+} from './patchStorage';
 import type { PatchTypeValue } from './patchTypes';
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -80,7 +87,7 @@ export interface ReconcileResult {
   // key; it doesn't.
   byStatus: Record<string, number>;
   // Found on disk and reattached — patchUploadedAt/patchUploadedById/
-  // patchFileSize/patchStoredSlug set (attributed to whoever ran this
+  // patchFileSize/patchStoredSlug/patchStoredPath set (attributed to whoever ran this
   // reconcile, since the original uploader/timestamp for these was never
   // preserved anywhere once patchUploadedAt got cleared).
   reattached: number;
@@ -111,6 +118,9 @@ export async function reconcilePatchFiles(actingAdminId: string): Promise<Reconc
       patchSha1: true,
       patchType: true,
       patchStoredSlug: true,
+      patchStoredPath: true,
+      platform: true,
+      baseRom: { select: { name: true } },
       hackName: true,
       version: true,
       status: true,
@@ -128,31 +138,71 @@ export async function reconcilePatchFiles(actingAdminId: string): Promise<Reconc
       batch.map(async (c) => {
         const sha1 = (c.patchSha1 as string).toLowerCase();
         const patchType = c.patchType as PatchTypeValue;
-        // Same fallback as the detailed-DAT-reimport reattachment logic
-        // (admin/import/route.ts) — prefer the exact slug the file was
-        // actually stored under if we still know it, else recompute one
-        // from the submission's own current name/version.
+        // Same candidate order as the detailed-DAT-reimport reattachment
+        // logic (admin/import/route.ts): the location the row itself still
+        // remembers (if any), then where an upload would file it TODAY (the
+        // folder layout), then the old flat layout — which uses the exact
+        // slug the file was originally stored under if we still know it,
+        // else one recomputed from the submission's own current
+        // name/version. The first one that is definitively there wins.
         const slug = c.patchStoredSlug || buildPatchDisplaySlug(c.hackName, c.version);
-        const attemptedPath = resolveStoredPath(sha1, patchType, slug);
-        const result = await statPatchFileStrict(sha1, patchType, slug);
+        const candidates: StoredPatchRef[] = [];
+        if (c.patchStoredPath) candidates.push({ sha1, patchType, storedPath: c.patchStoredPath, storedSlug: slug });
+        candidates.push({
+          sha1,
+          patchType,
+          storedPath: buildPatchRelativePath({
+            platform: c.platform,
+            baseRomName: c.baseRom?.name,
+            hackName: c.hackName,
+            version: c.version,
+            sha1,
+            patchType,
+          }),
+          storedSlug: slug,
+        });
+        candidates.push({ sha1, patchType, storedPath: null, storedSlug: slug });
 
-        if (result.status === 'found') {
+        const attemptedPaths: string[] = [];
+        let found: { ref: StoredPatchRef; size: number } | null = null;
+        let failure: PatchFileCheckResult | null = null;
+        for (const ref of candidates) {
+          attemptedPaths.push(resolveStoredPath(ref));
+          const result = await statPatchFileStrict(ref);
+          if (result.status === 'found') {
+            found = { ref, size: result.size };
+            break;
+          }
+          // Anything but a definitive "not there" ends the search without
+          // acting — a later candidate being absent proves nothing about this one.
+          if (result.status === 'error') {
+            failure = result;
+            break;
+          }
+        }
+        const attemptedPath = attemptedPaths.join('  or  ');
+
+        if (found) {
           await prisma.submission.update({
             where: { id: c.id },
             data: {
               patchUploadedAt: new Date(),
               patchUploadedById: actingAdminId,
-              patchFileSize: result.size,
+              patchFileSize: found.size,
               patchStoredSlug: slug,
+              // null when the file was found in the old flat layout — the
+              // organize tool (patchOrganize.ts) files it into folders later.
+              patchStoredPath: found.ref.storedPath ?? null,
             },
           });
           reattached++;
-        } else if (result.status === 'not-found') {
+        } else if (!failure) {
           problems.push({ id: c.id, hackName: c.hackName, version: c.version, status: c.status, outcome: 'genuinely-missing', attemptedPath });
         } else {
-          const errorMessage = (result.error as NodeJS.ErrnoException)?.message || String(result.error);
+          const err = failure.status === 'error' ? failure.error : null;
+          const errorMessage = (err as NodeJS.ErrnoException)?.message || String(err);
           problems.push({ id: c.id, hackName: c.hackName, version: c.version, status: c.status, outcome: 'inconclusive', attemptedPath, error: errorMessage });
-          console.error(`[patchReconcile] couldn't confirm patch file for submission ${c.id} (${attemptedPath}):`, result.error);
+          console.error(`[patchReconcile] couldn't confirm patch file for submission ${c.id} (${attemptedPath}):`, err);
         }
       })
     );

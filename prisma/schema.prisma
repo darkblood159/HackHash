@@ -180,15 +180,28 @@ model Submission {
   patchUploadedBy   User?            @relation("SubmissionPatchUploadedBy", fields: [patchUploadedById], references: [id])
   // The exact human-readable slug (from hackName + version, sanitized —
   // see buildPatchDisplaySlug in src/lib/patchStorage.ts) baked into the
-  // stored file's actual filename on disk, alongside patchSha1: files are
-  // named {patchSha1}__{patchStoredSlug}.{ext}, not bare hashes, so a
-  // patch-storage folder means something when browsed directly (see
-  // CLAUDE_HANDOFF.txt section 2au). Persisted rather than recomputed on
-  // every read specifically so a LATER edit to hackName/version can never
+  // stored file's actual filename on disk, alongside patchSha1. In the
+  // folder layout the file is {patchStoredSlug}__{patchSha1}.{ext} (see
+  // patchStoredPath below); in the OLD flat layout it was
+  // {patchSha1}__{patchStoredSlug}.{ext}, and a row whose patchStoredPath
+  // is NULL is still looked up that way. Persisted rather than recomputed
+  // on every read specifically so a LATER edit to hackName/version can never
   // make an already-uploaded file unfindable — the slug is only ever
-  // regenerated at upload/re-upload time, same lifecycle as
-  // patchUploadedAt above.
+  // regenerated at upload/re-upload time (or when the admin organizer
+  // re-files the patch), same lifecycle as patchUploadedAt above.
   patchStoredSlug   String?
+  // Where the stored patch file lives inside patch storage, RELATIVE to the
+  // storage root, using forward slashes — e.g.
+  // "GBA/Pokemon Emerald (USA)/Some Hack/some-hack-v2-0__3a7f...e2.bps"
+  // (Platform / base ROM / hack / file; see buildPatchRelativePath in
+  // src/lib/patchStorage.ts). Persisted for the same reason patchStoredSlug is:
+  // renaming a hack or base ROM later must never make an uploaded file
+  // unfindable. NULL means the file (if any) still sits in the old flat layout,
+  // {patchSha1}__{patchStoredSlug}.{ext} at the storage root — every read path
+  // falls back to that, and the admin "Organize patch files" tool
+  // (src/lib/patchOrganize.ts) moves such files into the folder layout and
+  // fills this in. Purely additive: nothing existing needs this to be set.
+  patchStoredPath   String?
   // Reference to the UNPATCHED source ROM this hack's patch expects to be
   // applied against — different from crc32/md5/sha1 above, which hash the
   // finished/patched ROM this submission is actually about. Helps people
@@ -228,6 +241,16 @@ model Submission {
   submittedBy       User             @relation(fields: [submittedById], references: [id])
   datImportId       String?
   datImport         DatImport?       @relation(fields: [datImportId], references: [id])
+  // Which bulk-submit batch (see SubmissionBatch below) created this row, if
+  // any. Null for every submission made one at a time — including everything
+  // that existed before bulk submit did — and that is a normal, permanent
+  // state, not a legacy gap. Purely a grouping/undo handle; nothing about a
+  // batched submission's review, verification, or approval differs from any
+  // other. onDelete: SetNull (Prisma's default for an optional relation,
+  // spelled out for the same reason as franchiseId) — removing a batch
+  // record unlinks its submissions rather than touching them.
+  batchId           String?
+  batch             SubmissionBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
   gameMappingId     String?
   gameMapping       GameMapping?     @relation(fields: [gameMappingId], references: [id])
   // Groups this submission together with other versions of the same hack
@@ -246,6 +269,20 @@ model Submission {
   // ordinary rejections, with no way to restore.
   deletedAt         DateTime?
   deletedById       String?
+
+  // When the Hasheous pull last got a DEFINITIVE answer for this hash —
+  // either "found" or a genuine "not found" (HTTP 404). Never set when the
+  // lookup itself failed (timeout / 429 / 5xx), so a Hasheous outage can't
+  // postpone the next real attempt. Lives on Submission rather than
+  // GameMapping because a hash Hasheous doesn't know yet has no GameMapping
+  // row at all (and creating an empty one just to hold a timestamp would
+  // make the page think a mapping exists). Used by syncScheduler.ts to
+  // rotate through ALL unresolved/synced entries instead of re-asking about
+  // the same newest 200 forever. IMPORTANT: written only via a raw UPDATE
+  // (hasheousSync.ts markHasheousChecked) — a normal Prisma update would
+  // bump `updatedAt`, which hack-family aggregation uses as its "most
+  // recently edited version wins" tiebreaker.
+  hasheousCheckedAt DateTime?
 
   verifications    Verification[]
   screenshots      Screenshot[]
@@ -271,6 +308,7 @@ model Submission {
   @@index([baseRomId])
   @@index([franchiseId])
   @@index([authorId])
+  @@index([batchId])
 }
 
 enum SubmissionStatus {
@@ -848,6 +886,41 @@ model DatImport {
   submissions       Submission[]
 
   @@index([createdAt])
+}
+
+// ─── Bulk Submit Batches ────────────────────────────────────────────────────
+//
+// One row per "submit several versions of a hack at once" session — the
+// user-facing counterpart of DatImport above, and modeled on it: a handle
+// that groups the submissions a single action created so they can be seen
+// together and, if the whole batch turns out to be wrong (wrong base ROM
+// picked once and applied to every row, say), undone together in one step
+// instead of row by row. Each submission in a batch is still an ordinary
+// PENDING submission that goes through normal community verification — a
+// batch grants no shortcut to approval and changes nothing about review.
+//
+// submittedById is a plain String with NO @relation, exactly like
+// Author.submittedById and DatImport.importedById — it imposes no ordering
+// constraint on backup/restore (see src/lib/fullBackup.ts) and doesn't add a
+// back-relation field to User for a column only ever read alongside the
+// batch itself.
+//
+// hackName/platform are the batch's shared header, stored so an admin
+// listing can label a batch even if none of its rows were ultimately
+// created. The reversed* trio mirrors DatImport's soft-reverse fields.
+model SubmissionBatch {
+  id            String    @id @default(cuid())
+  submittedById String
+  hackName      String
+  platform      Platform
+  reversed      Boolean   @default(false)
+  reversedAt    DateTime?
+  reversedById  String?
+  createdAt     DateTime  @default(now())
+
+  submissions   Submission[]
+
+  @@index([submittedById, createdAt])
 }
 
 // ─── Change Requests ────────────────────────────────────────────────────────

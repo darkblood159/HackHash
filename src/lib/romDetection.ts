@@ -38,6 +38,8 @@
 // formats are verified with the same rigor; it was never claimed, and
 // should never be assumed, to be exhaustive.
 
+import { sampleFromBuffer, type FileSample } from './fileSample';
+
 export interface RomDetectionResult {
   looksLikeRom: boolean;
   matchedFormat?: string;
@@ -104,22 +106,44 @@ const ROM_SIGNATURES: RomSignature[] = [
 const GBA_FIXED_VALUE_OFFSET = 0xb2;
 const GBA_FIXED_VALUE = 0x96;
 
-function bytesMatchAt(bytes: Buffer, offset: number, expected: number[]): boolean {
-  if (bytes.length < offset + expected.length) return false;
+// The deepest byte this file ever reads (offset of the last byte examined,
+// plus one). patchValidation.ts asserts SAMPLE_HEAD_BYTES (fileSample.ts) is
+// at least this deep at module load — the chunked upload path validates a
+// head/tail SAMPLE of the file rather than the whole thing, so a signature
+// added here at a deeper offset than the sample covers would otherwise
+// silently never match there. Computed from the tables above, so adding a
+// signature updates it automatically.
+export const ROM_DETECTION_MAX_READ_BYTES = Math.max(
+  ...ROM_SIGNATURES.map((sig) => sig.offset + sig.bytes.length),
+  GBA_FIXED_VALUE_OFFSET + 1
+);
+
+// `size` is the TRUE size of the whole file; `head` holds its first
+// min(size, SAMPLE_HEAD_BYTES) bytes. Every signature offset is within the
+// head window (asserted in patchValidation.ts), so when size >= offset+len
+// the bytes being compared are always present in `head`.
+function bytesMatchAt(sample: FileSample, offset: number, expected: number[]): boolean {
+  if (sample.size < offset + expected.length) return false;
   for (let i = 0; i < expected.length; i++) {
-    if (bytes[offset + i] !== expected[i]) return false;
+    if (sample.head[offset + i] !== expected[i]) return false;
   }
   return true;
 }
 
-export function looksLikeKnownRom(bytes: Buffer): RomDetectionResult {
+export function looksLikeKnownRomFromSample(sample: FileSample): RomDetectionResult {
   for (const sig of ROM_SIGNATURES) {
-    if (bytesMatchAt(bytes, sig.offset, sig.bytes)) {
+    if (bytesMatchAt(sample, sig.offset, sig.bytes)) {
       return { looksLikeRom: true, matchedFormat: sig.label };
     }
   }
-  if (bytes.length > GBA_FIXED_VALUE_OFFSET && bytes[GBA_FIXED_VALUE_OFFSET] === GBA_FIXED_VALUE) {
+  if (sample.size > GBA_FIXED_VALUE_OFFSET && sample.head[GBA_FIXED_VALUE_OFFSET] === GBA_FIXED_VALUE) {
     return { looksLikeRom: true, matchedFormat: 'a Game Boy Advance ROM' };
   }
   return { looksLikeRom: false };
+}
+
+// Original signature, unchanged for existing callers — a thin wrapper, so
+// there is exactly one implementation of the checks (above).
+export function looksLikeKnownRom(bytes: Buffer): RomDetectionResult {
+  return looksLikeKnownRomFromSample(sampleFromBuffer(bytes));
 }

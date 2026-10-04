@@ -8,7 +8,7 @@ import { Upload, Download, RefreshCw, CheckCircle2, XCircle, AlertTriangle, Exte
 type HasheousEnv = 'beta' | 'production';
 
 interface JobEntry {
-  id: string; hackName: string; sha1: string; mappingsApplied?: string[];
+  id: string; hackName: string; sha1: string; mappingsApplied?: string[]; error?: string;
 }
 interface PullJob {
   id: string;
@@ -32,6 +32,21 @@ const ENV_URLS: Record<HasheousEnv, string> = {
   beta: 'https://beta.hasheous.org',
   production: 'https://hasheous.org',
 };
+
+interface AutoSyncInfo {
+  schedule: { pullEveryMs: number; recheckUnresolvedMs: number; refreshSyncedMs: number; pullBatch: number; refreshBatch: number };
+  lastAutoPull: {
+    startedAt: string; finishedAt: string | null; status: string; env: string;
+    processed: number; found: number; updated: number; notFound: number; errorMessage: string | null;
+  } | null;
+}
+
+// 21600000 -> "6 hours", 86400000 -> "24 hours", 604800000 -> "7 days"
+function humanInterval(ms: number): string {
+  const hours = ms / 3600000;
+  if (hours >= 48 && hours % 24 === 0) return `${hours / 24} days`;
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
 
 interface PushVerificationSummary {
   pending: number;
@@ -76,6 +91,7 @@ export default function AdminHasheousPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [verification, setVerification] = useState<PushVerificationSummary | null>(null);
+  const [autoSync, setAutoSync] = useState<AutoSyncInfo | null>(null);
 
   useEffect(() => {
     fetch('/api/admin/hasheous/push-verification')
@@ -89,6 +105,7 @@ export default function AdminHasheousPage() {
       .then((r) => r.json())
       .then((d) => {
         setApiKeySet(d.apiKeyConfigured);
+        if (d.schedule) setAutoSync({ schedule: d.schedule, lastAutoPull: d.lastAutoPull ?? null });
         // Default to whatever HASHEOUS_ENV is set to in .env, not always beta
         if (d.env) setEnv(d.env as HasheousEnv);
       })
@@ -216,6 +233,35 @@ export default function AdminHasheousPage() {
           Active: <a href={ENV_URLS[env]} target="_blank" rel="noreferrer" className="text-phosphor hover:underline font-mono">{ENV_URLS[env]}</a>
         </p>
       </div>
+
+      {autoSync && (
+        <div className="p-5 rounded-lg border border-border bg-bg-surface">
+          <div className="flex items-center gap-2 mb-2">
+            <Clock size={16} className="text-phosphor" />
+            <h2 className="text-sm font-semibold text-text-primary">Automatic sync</h2>
+          </div>
+          <p className="text-xs text-text-secondary leading-relaxed">
+            You don't need to pull by hand. Every {humanInterval(autoSync.schedule.pullEveryMs)} the server asks Hasheous
+            about up to {autoSync.schedule.pullBatch} entries it doesn't have an answer for yet (each asked at most once every{' '}
+            {humanInterval(autoSync.schedule.recheckUnresolvedMs)}), plus up to {autoSync.schedule.refreshBatch} already-synced
+            entries it re-checks every {humanInterval(autoSync.schedule.refreshSyncedMs)} to pick up anything Hasheous added since
+            (fill-only — never overwrites or clears). Hasheous can only match a hash after it has imported a DAT containing it, and
+            it keeps lookup results for up to 5 days, so a new match can take a while to show up. Use a manual pull to force it now.
+          </p>
+          <p className="text-xs text-text-muted mt-2">
+            {autoSync.lastAutoPull ? (
+              <>
+                Last automatic pull: {new Date(autoSync.lastAutoPull.startedAt).toLocaleString()} ({autoSync.lastAutoPull.env}) —{' '}
+                {autoSync.lastAutoPull.status === 'RUNNING' ? 'still running' : autoSync.lastAutoPull.status === 'ERROR' ? 'stopped early' : 'finished'}
+                {autoSync.lastAutoPull.status !== 'RUNNING' && <>: {autoSync.lastAutoPull.processed} checked, {autoSync.lastAutoPull.found} found ({autoSync.lastAutoPull.updated} updated), {autoSync.lastAutoPull.notFound} not found</>}
+                {autoSync.lastAutoPull.errorMessage && <span className="block text-status-pending mt-0.5">{autoSync.lastAutoPull.errorMessage}</span>}
+              </>
+            ) : (
+              <>No automatic pull recorded yet. The first one runs shortly after the server starts, and a cycle with nothing to do records nothing.</>
+            )}
+          </p>
+        </div>
+      )}
 
       {verification && (verification.pending > 0 || verification.confirmed > 0 || verification.notReflected > 0) && (
         <div className="p-5 rounded-lg border border-border bg-bg-surface">
@@ -431,7 +477,11 @@ export default function AdminHasheousPage() {
                 <tbody>
                   {activeList.slice(0, 300).map((r) => (
                     <tr key={r.id} className="border-t border-border-subtle">
-                      <td className="px-3 py-1.5 text-text-primary">{r.hackName}</td>
+                      <td className="px-3 py-1.5 text-text-primary">
+                        {r.hackName}
+                        {/* A lookup that FAILED (timeout / rate limit) is listed here too, but isn't a real miss — say so. */}
+                        {r.error && <span className="block text-[10px] text-status-pending">lookup failed, not a real miss: {r.error}</span>}
+                      </td>
                       {resultsTab === 'updated' && <td className="px-3 py-1.5 text-text-muted">{r.mappingsApplied?.join(', ')}</td>}
                       <td className="px-3 py-1.5 text-text-muted font-mono">{r.sha1.slice(0, 12)}…</td>
                     </tr>

@@ -12,11 +12,57 @@
 // logic ever needs to change, and so the new "pull immediately on approval"
 // trigger (approval.ts) doesn't become a third copy.
 
+import type { Prisma } from '@prisma/client';
 import { prisma } from './prisma';
 import {
-  lookupByHashes, extractMappings, extractCanonicalFields, pullIGDBMetadata,
+  lookupByHashesDetailed, extractMappings, extractCanonicalFields, pullIGDBMetadata,
   hasClientApiKey, getHasheousBaseUrl, type HasheousEnv,
 } from './hasheous';
+
+/**
+ * "This submission has never had a successful Hasheous pull" — the ONE
+ * definition, shared by the background scheduler and the manual bulk pull
+ * route (they used to each hand-copy `{ hasheousSyncStatus: { not: 'ok' } }`,
+ * and that copy was wrong for the same reason in both places).
+ *
+ * Why this is more than `status != 'ok'`:
+ *  - SQL's `<>` never matches NULL, and Prisma's `{ not: 'ok' }` compiles to a
+ *    plain `<>` (verified against a real Postgres). `hasheousSyncStatus` is
+ *    NULL for every GameMapping created by hand — the submit form, an admin
+ *    edit, a change request, a DAT import — so with `{ not: 'ok' }` alone
+ *    every such hack was invisible to the pull forever. It needs its own
+ *    `null` clause.
+ *  - `hasheousId: null` catches a mapping marked 'ok' that was never actually
+ *    pulled. The manual PUSH route used to stamp status='ok' on a successful
+ *    push even for a mapping with no Hasheous data at all (fixed in
+ *    push/route.ts, but rows it already marked are still out there).
+ *  - `gameMappingId: null`: no mapping row at all (a hash Hasheous hadn't
+ *    matched yet, or one nobody entered links for).
+ */
+export const NEEDS_FIRST_SYNC_CLAUSES: Prisma.SubmissionWhereInput[] = [
+  { gameMappingId: null },
+  { gameMapping: { hasheousSyncStatus: null } },
+  { gameMapping: { hasheousSyncStatus: { not: 'ok' } } },
+  { gameMapping: { hasheousId: null } },
+];
+
+/**
+ * Record that Hasheous gave a DEFINITIVE answer (found, or a real 404) for
+ * this submission's hash just now. Deliberately a raw UPDATE, not
+ * prisma.submission.update: Submission.updatedAt is @updatedAt, and a Prisma
+ * update from a background job would bump it for every entry checked —
+ * `updatedAt` is what hack-family aggregation (entries/hack-family/[id])
+ * uses to decide which version's shared fields are the "most recently
+ * edited", so a silent bump would reshuffle that. Never throws: a failure
+ * here only means this entry is asked about again sooner than necessary.
+ */
+export async function markHasheousChecked(submissionId: string): Promise<void> {
+  try {
+    await prisma.$executeRaw`UPDATE "Submission" SET "hasheousCheckedAt" = ${new Date()} WHERE "id" = ${submissionId}`;
+  } catch (err: any) {
+    console.error(`[hasheous] could not record check time for ${submissionId}:`, err?.message ?? err);
+  }
+}
 
 // The only fields Hasheous's FixMatch endpoint actually accepts (see
 // pushMappingToHasheous in hasheous.ts) — steamId/wikipediaUrl/igdbSlug/
@@ -119,10 +165,25 @@ export async function pullMappingForSubmission(
   overwrite = false
 ): Promise<PullOneResult> {
   try {
-    const result = await lookupByHashes({ sha1: sub.sha1, md5: sub.md5, crc32: sub.crc32 }, env);
-    if (!result || typeof result !== 'object') {
+    const lookup = await lookupByHashesDetailed({ sha1: sub.sha1, md5: sub.md5, crc32: sub.crc32 }, env);
+
+    // The request itself failed (timeout / 429 / 5xx / network). That says
+    // NOTHING about whether Hasheous knows this hash, so: report it as an
+    // error (never as "not found"), and do NOT record a check time — it must
+    // stay due so the next cycle retries it promptly.
+    if (lookup.status === 'error') {
+      return { found: false, updated: false, appliedKeys: [], error: lookup.message };
+    }
+
+    // A real, definitive "no match". Remember we asked, so the scheduler
+    // moves on to other entries instead of re-asking about this one every
+    // cycle (and so older entries behind it aren't starved).
+    if (lookup.status === 'not_found') {
+      await markHasheousChecked(sub.id);
       return { found: false, updated: false, appliedKeys: [] };
     }
+
+    const result = lookup.result;
 
     const existingMapping: any = sub.gameMappingId
       ? await prisma.gameMapping.findUnique({ where: { id: sub.gameMappingId } })
@@ -341,6 +402,8 @@ export async function pullMappingForSubmission(
       const mapping = await prisma.gameMapping.create({ data });
       await prisma.submission.update({ where: { id: sub.id }, data: { gameMappingId: mapping.id } });
     }
+
+    await markHasheousChecked(sub.id);
 
     return { found: true, updated: appliedKeys.length > 0, appliedKeys };
   } catch (err: any) {

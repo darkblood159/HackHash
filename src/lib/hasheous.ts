@@ -186,18 +186,36 @@ export async function lookupByHash(
   }
 }
 
-export async function lookupByHashes(
+// What a lookup actually concluded. The old lookupByHashes() collapsed all of
+// these into `null`, so a Hasheous outage, a 429 storm, a timeout and a real
+// "this hash isn't in any DAT we know" 404 were indistinguishable — every one
+// was reported (and, worse, would have been RECORDED) as "not found". A real
+// miss and a failed request need opposite handling: a miss is a definitive
+// answer worth remembering; a failure says nothing about the hash at all and
+// must be retried soon.
+export type HasheousLookupOutcome =
+  | { status: 'found'; result: HasheousLookupResult }
+  | { status: 'not_found' }
+  | { status: 'error'; message: string };
+
+export async function lookupByHashesDetailed(
   hashes: { sha1: string; md5: string; crc32: string },
   env?: HasheousEnv,
   maxRetries = 2
-): Promise<HasheousLookupResult | null> {
+): Promise<HasheousLookupOutcome> {
   const baseUrl = getHasheousBaseUrl(env);
+  let lastError = 'unknown error';
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let res: Response;
     try {
       // Use the POST endpoint — it accepts all three hashes simultaneously,
       // which gives Hasheous more to match on than just the SHA1 alone.
+      // NOTE (verified against Hasheous's SignatureManagement.cs): the three
+      // hashes are combined with AND — a candidate game must have a ROM
+      // matching EVERY hash supplied (a blank/NULL hash on Hasheous's side
+      // counts as a wildcard). So a wrong md5/crc32 stored here makes a
+      // lookup miss even when the sha1 alone would hit.
       // Per-request timeout is 12s: short enough that a hanging entry fails
       // fast and the batch can keep going, not so short that a slow-but-valid
       // response gets cut off.
@@ -217,47 +235,67 @@ export async function lookupByHashes(
     } catch (err: any) {
       if (err?.name === 'AbortError') {
         // Timeout — don't retry, just skip this entry and move on
-        return null;
+        return { status: 'error', message: 'Hasheous timed out after 12s' };
       }
+      lastError = err?.message ?? 'network error';
       if (attempt < maxRetries) {
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
         continue;
       }
-      return null;
+      return { status: 'error', message: lastError };
     }
 
-    if (res.status === 404) return null;
+    // A real, definitive "no signature matches these hashes".
+    if (res.status === 404) return { status: 'not_found' };
 
     if (res.status === 429) {
       const retryAfterRaw = res.headers.get('Retry-After');
-      const waitMs = retryAfterRaw
-        ? parseInt(retryAfterRaw, 10) * 1000
+      const retryAfterSecs = retryAfterRaw ? parseInt(retryAfterRaw, 10) : NaN;
+      const waitMs = Number.isFinite(retryAfterSecs)
+        ? retryAfterSecs * 1000
         : Math.min(3000 * Math.pow(2, attempt), 20000);
+      lastError = 'Hasheous rate-limited the request (HTTP 429)';
 
       if (attempt < maxRetries) {
         console.warn(`[hasheous] 429 on attempt ${attempt + 1}, waiting ${waitMs}ms`);
         await new Promise((r) => setTimeout(r, waitMs));
         continue;
       }
-      return null;
+      return { status: 'error', message: lastError };
     }
 
     if (!res.ok) {
+      lastError = `Hasheous returned HTTP ${res.status}`;
       if (attempt < maxRetries) {
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
         continue;
       }
-      return null;
+      return { status: 'error', message: lastError };
     }
 
     try {
       const data = await res.json();
-      return Array.isArray(data) ? (data[0] ?? null) : data;
+      const result = Array.isArray(data) ? (data[0] ?? null) : data;
+      if (!result || typeof result !== 'object') return { status: 'not_found' };
+      return { status: 'found', result };
     } catch {
-      return null;
+      return { status: 'error', message: 'Hasheous returned a response that was not valid JSON' };
     }
   }
-  return null;
+  return { status: 'error', message: lastError };
+}
+
+// Kept for backward compatibility (nothing in the app calls it any more —
+// hasheousSync.ts uses lookupByHashesDetailed). Returns null for BOTH "not
+// found" and "request failed", exactly as it always did; use the Detailed
+// variant whenever the difference matters.
+export async function lookupByHashes(
+  hashes: { sha1: string; md5: string; crc32: string },
+  env?: HasheousEnv,
+  maxRetries = 2
+): Promise<HasheousLookupResult | null> {
+  const outcome = await lookupByHashesDetailed(hashes, env, maxRetries);
+  return outcome.status === 'found' ? outcome.result : null;
 }
 
 // Keep old single-hash function for backward compat but delegate to the new one

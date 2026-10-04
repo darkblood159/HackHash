@@ -1,5 +1,6 @@
 // src/app/submit/page.tsx
 import React, { Suspense } from 'react';
+import Link from 'next/link';
 import { SubmitForm } from '@/components/SubmitForm';
 
 export const metadata = {
@@ -15,6 +16,10 @@ export default function SubmitPage() {
         <p className="text-text-secondary mt-2 max-w-xl">
           Hash your file locally, fill in what you know, and the community takes it from there.
           Your ROM never leaves this browser tab.
+        </p>
+        <p className="text-xs text-text-muted mt-3">
+          Have several versions of the same hack?{' '}
+          <Link href="/submit/bulk" className="text-phosphor hover:underline">Submit them all at once</Link>.
         </p>
       </div>
       {/* useSearchParams() (used below to read ?fromSubmission=) requires a

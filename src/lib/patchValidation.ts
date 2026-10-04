@@ -34,28 +34,61 @@
 // once real fixtures are available to verify against; flagged in the
 // handoff rather than shipped unverified.
 import type { PatchTypeValue } from './patchTypes';
-import { looksLikeKnownRom } from './romDetection';
+import { looksLikeKnownRomFromSample, ROM_DETECTION_MAX_READ_BYTES } from './romDetection';
+import { SAMPLE_HEAD_BYTES, sampleFromBuffer, type FileSample } from './fileSample';
+
+// Load-time invariant, not a runtime check on user input: validation now
+// runs against a head/tail SAMPLE of the file (fileSample.ts) so the chunked
+// upload path never has to hold a multi-GB file in memory. That is only
+// equivalent to validating the whole file while the sample's head window
+// reaches the deepest byte romDetection.ts examines. If someone adds a ROM
+// signature deeper than that, this throws at startup (loudly, in dev and in
+// the first deploy) rather than the new signature silently never matching.
+if (ROM_DETECTION_MAX_READ_BYTES > SAMPLE_HEAD_BYTES) {
+  throw new Error(
+    `patchValidation: romDetection reads up to byte ${ROM_DETECTION_MAX_READ_BYTES}, but ` +
+      `SAMPLE_HEAD_BYTES (fileSample.ts) is only ${SAMPLE_HEAD_BYTES} — raise SAMPLE_HEAD_BYTES.`
+  );
+}
 
 // Raised twice now: 64MB -> 1GB after the first report that modern
 // disc-based total-conversion patches can legitimately run into the
 // hundreds of MB; then 1GB -> 2GB on a direct follow-up request. Kingdom
 // Hearts modding was the concrete example both times. PATCH_MAX_UPLOAD_BYTES
-// below still overrides this for anyone who needs more than 2GB too.
+// below still overrides this, up to MAX_STORABLE_PATCH_FILE_SIZE_BYTES.
 //
-// IMPORTANT — raising this alone may not be enough: a reverse proxy in
-// front of this app (Nginx Proxy Manager, in this project's own documented
-// deployment — see DOCKER_PORTAINER_GUIDE.md) commonly has its own,
-// separate upload-size cap (`client_max_body_size`, defaulting to 1MB)
-// that rejects an oversized request BEFORE it ever reaches this
-// application-level check at all. If a large upload still fails after
-// raising PATCH_MAX_UPLOAD_BYTES, that proxy setting is the next thing to
-// check — this app has no way to detect or work around a limit enforced
-// in front of it.
-const DEFAULT_MAX_PATCH_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024; // 2GB
+// WHY THE HARD CEILING: Submission.patchFileSize is a 32-bit Postgres
+// INTEGER (prisma/schema.prisma), max 2,147,483,647. A file of exactly
+// 2GiB (2,147,483,648) — or anything larger — would be fully written to disk
+// by the upload path and THEN fail at the database update, leaving an orphan
+// file and a 500. That used to be practically unreachable; chunked uploads
+// (patchUploadSession.ts) make it reachable, so the cap is clamped in code.
+// Going past 2GB means changing patchFileSize to BigInt (a migration, plus
+// BigInt-safe JSON serialization everywhere the field is returned) — a
+// deliberate separate change, not something an env var should paper over.
+//
+// TWO SEPARATE PROXY LIMITS SIT IN FRONT OF THIS APP, and neither is visible
+// to it: Nginx Proxy Manager's `client_max_body_size` (see
+// DOCKER_PORTAINER_GUIDE.md) AND Cloudflare's per-REQUEST body cap (100MB on
+// Free/Pro, 200MB Business, 500MB Enterprise). Files larger than
+// CHUNKED_UPLOAD_THRESHOLD_BYTES (patchUploadChunking.ts) are therefore
+// uploaded as a series of small requests (src/lib/chunkedUpload.ts on the
+// client, /api/submissions/[id]/patch/uploads on the server), each of which
+// stays under those caps no matter how big the file is.
+const MAX_STORABLE_PATCH_FILE_SIZE_BYTES = 2_147_483_647; // INT32_MAX — see above
 export const MAX_PATCH_FILE_SIZE_BYTES = (() => {
   const raw = process.env.PATCH_MAX_UPLOAD_BYTES;
   const parsed = raw ? Number.parseInt(raw, 10) : NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_PATCH_FILE_SIZE_BYTES;
+  const wanted = Number.isFinite(parsed) && parsed > 0 ? parsed : MAX_STORABLE_PATCH_FILE_SIZE_BYTES;
+  if (wanted > MAX_STORABLE_PATCH_FILE_SIZE_BYTES) {
+    console.warn(
+      `[patchValidation] PATCH_MAX_UPLOAD_BYTES=${wanted} exceeds ${MAX_STORABLE_PATCH_FILE_SIZE_BYTES} ` +
+        '(the largest value Submission.patchFileSize, a 32-bit INTEGER, can store) — clamping to that. ' +
+        'Supporting larger patches needs patchFileSize migrated to BigInt.'
+    );
+    return MAX_STORABLE_PATCH_FILE_SIZE_BYTES;
+  }
+  return wanted;
 })();
 
 export function isValidSha1Hex(value: string): boolean {
@@ -63,12 +96,17 @@ export function isValidSha1Hex(value: string): boolean {
 }
 
 /**
- * Sniffs a buffer's header (and, where cheap and reliable, its structure)
+ * Sniffs a file's header (and, where cheap and reliable, its structure)
  * against every format's real magic bytes. Returns the detected
  * PatchTypeValue, or null if nothing matched — never guesses.
+ *
+ * Works on a head/tail SAMPLE (fileSample.ts), not the whole file: nothing
+ * below reads past the first 5 bytes except the IPS check, which reads the
+ * last 3. `size` is always the TRUE file size, never head.length.
  */
-export function detectPatchFormat(bytes: Buffer): PatchTypeValue | null {
-  if (bytes.length < 4) return null;
+export function detectPatchFormatFromSample(sample: FileSample): PatchTypeValue | null {
+  const { size, head, tail } = sample;
+  if (size < 4) return null;
 
   // IPS — 'PATCH' (5 bytes). A real IPS parser walks record-by-record
   // looking for a 3-byte offset value of 0x454f46 ('EOF' as a big-endian
@@ -77,22 +115,22 @@ export function detectPatchFormat(bytes: Buffer): PatchTypeValue | null {
   // are 'EOF' is a real structural signal (not just "starts with PATCH")
   // at a fraction of the complexity, and matches a well-formed IPS with no
   // trailing junk after the marker.
-  if (bytes.length >= 5 && bytes.subarray(0, 5).toString('ascii') === 'PATCH') {
-    if (bytes.length >= 8 && bytes.subarray(-3).toString('ascii') === 'EOF') {
+  if (size >= 5 && head.subarray(0, 5).toString('ascii') === 'PATCH') {
+    if (size >= 8 && tail.subarray(-3).toString('ascii') === 'EOF') {
       return 'IPS';
     }
     return null; // starts like IPS but doesn't end like one
   }
 
-  if (bytes.subarray(0, 4).toString('ascii') === 'BPS1') return 'BPS';
-  if (bytes.subarray(0, 4).toString('ascii') === 'UPS1') return 'UPS';
+  if (head.subarray(0, 4).toString('ascii') === 'BPS1') return 'BPS';
+  if (head.subarray(0, 4).toString('ascii') === 'UPS1') return 'UPS';
 
   // PPF — 'PPF' (3 bytes) followed by a 2-digit ASCII version string
   // ('10'/'20'/'30' for v1.0/2.0/3.0), read as its own field by
   // RomPatcher.js rather than being part of one fixed 5-byte magic.
   // Checking both is stronger than checking either alone.
-  if (bytes.length >= 5 && bytes.subarray(0, 3).toString('ascii') === 'PPF') {
-    const versionDigits = bytes.subarray(3, 5).toString('ascii');
+  if (size >= 5 && head.subarray(0, 3).toString('ascii') === 'PPF') {
+    const versionDigits = head.subarray(3, 5).toString('ascii');
     return /^[0-9]{2}$/.test(versionDigits) ? 'PPF' : null;
   }
 
@@ -100,11 +138,11 @@ export function detectPatchFormat(bytes: Buffer): PatchTypeValue | null {
   // practice) — 3 magic bytes 0xD6 0xC3 0xC4 plus a version byte that RFC
   // 3284 defines as always 0x00 for the only version ever specified.
   if (
-    bytes.length >= 4 &&
-    bytes[0] === 0xd6 &&
-    bytes[1] === 0xc3 &&
-    bytes[2] === 0xc4 &&
-    bytes[3] === 0x00
+    size >= 4 &&
+    head[0] === 0xd6 &&
+    head[1] === 0xc3 &&
+    head[2] === 0xc4 &&
+    head[3] === 0x00
   ) {
     return 'XDELTA';
   }
@@ -119,9 +157,16 @@ export function detectPatchFormat(bytes: Buffer): PatchTypeValue | null {
   // really are different formats), PatchType would need splitting into
   // two enum values — out of scope for this validation gate, flagged in
   // the handoff instead of guessed at.
-  if (bytes.subarray(0, 4).toString('ascii') === 'APS1') return 'APS';
+  if (head.subarray(0, 4).toString('ascii') === 'APS1') return 'APS';
 
   return null;
+}
+
+// Original Buffer-based signature, unchanged for existing callers — a thin
+// wrapper over the sample implementation above so there is exactly one copy
+// of the format checks.
+export function detectPatchFormat(bytes: Buffer): PatchTypeValue | null {
+  return detectPatchFormatFromSample(sampleFromBuffer(bytes));
 }
 
 export interface PatchValidationResult {
@@ -149,19 +194,19 @@ export interface PatchValidationResult {
  * (or none at all) leaves the original all-or-nothing behavior completely
  * unchanged.
  */
-export function validatePatchUpload(
-  bytes: Buffer,
+export function validatePatchSample(
+  sample: FileSample,
   declaredType?: PatchTypeValue | null
 ): PatchValidationResult {
-  if (bytes.length === 0) {
+  if (sample.size === 0) {
     return { ok: false, reason: 'Empty file.' };
   }
-  if (bytes.length > MAX_PATCH_FILE_SIZE_BYTES) {
+  if (sample.size > MAX_PATCH_FILE_SIZE_BYTES) {
     const limitMb = (MAX_PATCH_FILE_SIZE_BYTES / (1024 * 1024)).toFixed(0);
     return { ok: false, reason: `File is larger than the ${limitMb}MB limit for patch uploads.` };
   }
 
-  const detected = detectPatchFormat(bytes);
+  const detected = detectPatchFormatFromSample(sample);
   if (detected) {
     // Always trust real byte detection over a stale/wrong declaration,
     // 'OTHER' included — if someone declared OTHER but the bytes turn out
@@ -187,7 +232,7 @@ export function validatePatchUpload(
   // control. This ROM check is the second, automatic layer on top of it,
   // not a substitute for it.)
   if (declaredType === 'OTHER') {
-    const romCheck = looksLikeKnownRom(bytes);
+    const romCheck = looksLikeKnownRomFromSample(sample);
     if (romCheck.looksLikeRom) {
       return {
         ok: false,
@@ -207,4 +252,14 @@ export function validatePatchUpload(
       '"Other" first, then upload again. Otherwise: HackHash only stores patches, never full ' +
       "ROMs or ISOs — a base ROM or a finished romhack can't be uploaded here.",
   };
+}
+
+// Original Buffer-based signature, unchanged for the legacy single-request
+// upload path — a thin wrapper over validatePatchSample so both upload paths
+// run literally the same validation code.
+export function validatePatchUpload(
+  bytes: Buffer,
+  declaredType?: PatchTypeValue | null
+): PatchValidationResult {
+  return validatePatchSample(sampleFromBuffer(bytes), declaredType);
 }

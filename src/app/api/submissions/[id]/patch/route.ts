@@ -1,7 +1,13 @@
 // src/app/api/submissions/[id]/patch/route.ts
 //
 // Uploads (POST), removes (DELETE), or downloads (GET) the actual patch
-// FILE for a submission. Deliberately a separate call from submission
+// FILE for a submission. POST here is the single-request path, used for
+// files up to CHUNKED_UPLOAD_THRESHOLD_BYTES (patchUploadChunking.ts); larger
+// files go through the chunked/resumable endpoints under ./uploads instead,
+// because Cloudflare caps a single proxied request body (100MB Free/Pro).
+// Both paths run the SAME validation/recording code (patchUploadFinalize.ts).
+// Bulk submit (src/lib/bulkLimits.ts) also calls THIS single-request path, with
+// `?batch=<id>`, for each row's patch — see the claim handling in POST below. Deliberately a separate call from submission
 // create/edit — those are plain JSON endpoints, and multipart/form-data
 // needs different parsing (request.formData()), same reason base-rom
 // creation is its own prior call rather than part of the submit payload
@@ -30,12 +36,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
-import { checkPatchUploadRateLimit, checkSearchRateLimit, getClientIp, rateLimitedResponse } from '@/lib/rateLimit';
-import { validatePatchUpload, MAX_PATCH_FILE_SIZE_BYTES } from '@/lib/patchValidation';
-import { writePatchFile, readPatchFile, deletePatchFile, buildPatchDisplaySlug } from '@/lib/patchStorage';
-import { canManagePatchFile, isPrivilegedPatchRole } from '@/lib/patchPermissions';
-import { arePatchUploadsDisabled, PATCH_UPLOADS_DISABLED_MESSAGE } from '@/lib/siteSettings';
-import { type PatchTypeValue, patchTypeLabel } from '@/lib/patchTypes';
+import { checkPatchUploadRateLimit, checkBulkPatchUploadRateLimit, checkSearchRateLimit, getClientIp, rateLimitedResponse } from '@/lib/rateLimit';
+import { MAX_PATCH_FILE_SIZE_BYTES } from '@/lib/patchValidation';
+import { sampleFromBuffer } from '@/lib/fileSample';
+import { finalizePatchUpload, loadAuthorizedSubmission } from '@/lib/patchUploadFinalize';
+import { writePatchFile, readPatchFile, deletePatchFile, storedPatchRef } from '@/lib/patchStorage';
+import { canManagePatchFile } from '@/lib/patchPermissions';
+import { arePatchUploadsDisabled, areBulkSubmitsDisabled, PATCH_UPLOADS_DISABLED_MESSAGE } from '@/lib/siteSettings';
+import { loadOpenBatch, BatchError } from '@/lib/submissionBatch';
 
 // Multipart overhead for a single-file form (boundary strings, the one
 // field's headers) is at most a few hundred bytes in practice — 64KB of
@@ -92,7 +100,29 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: PATCH_UPLOADS_DISABLED_MESSAGE, uploadsDisabled: true }, { status: 503 });
   }
 
-  const rateLimit = await checkPatchUploadRateLimit(session.user.id);
+  // Bulk submit uploads one patch per created version in quick succession,
+  // which the ordinary 10-per-10-minutes limit would cut off partway through
+  // a batch. A request may say it belongs to a batch (`?batch=<id>`); it only
+  // gets the bulk limiter if that batch is the caller's own, unwithdrawn and
+  // still open (loadOpenBatch), AND — checked once the submission is loaded,
+  // below — the submission really is one of that batch's rows. A stale,
+  // foreign, or switched-off claim silently falls back to the ordinary
+  // limiter rather than failing, so a wrong claim never blocks an upload the
+  // normal path would allow. DELETE below is unchanged on purpose.
+  const claimedBatch = req.nextUrl.searchParams.get('batch');
+  let bulkBatchId: string | null = null;
+  if (claimedBatch && claimedBatch.length <= 64 && !(await areBulkSubmitsDisabled())) {
+    try {
+      await loadOpenBatch(claimedBatch, session.user.id);
+      bulkBatchId = claimedBatch;
+    } catch (err) {
+      if (!(err instanceof BatchError)) throw err;
+    }
+  }
+
+  const rateLimit = bulkBatchId
+    ? await checkBulkPatchUploadRateLimit(session.user.id)
+    : await checkPatchUploadRateLimit(session.user.id);
   if (!rateLimit.success) {
     return rateLimitedResponse(rateLimit);
   }
@@ -113,30 +143,20 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     }
   }
 
-  const submission = await prisma.submission.findUnique({ where: { id: params.id } });
-  if (!submission || submission.deletedAt) {
-    return NextResponse.json({ error: 'Submission not found' }, { status: 404 });
-  }
-
-  const hadPriorFile = !!submission.patchUploadedAt;
-
-  const allowed = canManagePatchFile({
-    viewerId: session.user.id,
-    viewerRole: session.user.role,
-    submittedById: submission.submittedById,
-    status: submission.status,
-    patchUploadedAt: submission.patchUploadedAt,
-  });
-  if (!allowed) {
-    return NextResponse.json(
-      {
-        error: hadPriorFile
-          ? 'A patch file is already attached to this entry — only an admin or verifier can replace or remove it.'
-          : 'Forbidden — you can only upload a patch to your own submission while it is pending.',
-      },
-      { status: 403 }
-    );
-  }
+  // Submission lookup + canManagePatchFile (patchUploadFinalize.ts) — the same
+  // checks and messages this handler always had inline, now shared with the
+  // chunked upload endpoints so the permission rule has one implementation.
+  // `requireBatchId`: the bulk limiter above was chosen on the strength of the
+  // claimed batch alone, so the loader also verifies the submission really is
+  // one of that batch's rows (400 otherwise) — after "not found", before the
+  // permission check, exactly where this check sat before the refactor.
+  const auth = await loadAuthorizedSubmission(
+    { id: session.user.id, role: session.user.role },
+    params.id,
+    { requireBatchId: bulkBatchId }
+  );
+  if (!auth.ok) return auth.response;
+  const { submission, hadPriorFile } = auth;
 
   let formData: FormData;
   try {
@@ -166,155 +186,26 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   // just because a value is already sitting in the database.
   const computedSha1 = crypto.createHash('sha1').update(bytes).digest('hex'); // Node's digest('hex') is always lowercase
 
-  // The 'OTHER' escape hatch in validatePatchUpload (accepting a buffer
-  // that matches none of the six known patch signatures) is only ever
-  // offered to a privileged uploader — the real, load-bearing control
-  // against "declare it Other and upload a ROM," not the byte-level
-  // ROM/disc-image check validatePatchUpload also runs on that path
-  // (romDetection.ts), which is a second, automatic layer on top of this
-  // one, not a substitute for it. A non-privileged submitter can still
-  // set patchType to 'OTHER' on their own submission (a legitimate way to
-  // flag "my patch is in an uncommon format"), but their own upload
-  // attempt is validated as if nothing were declared at all — an
-  // undetectable file still gets the normal rejection, with a message
-  // pointing at needing a moderator instead of the normal "try declaring
-  // Other" suggestion, which would be actively misleading here since
-  // they already did that and it didn't help.
-  const isPrivileged = isPrivilegedPatchRole(session.user.role);
-  const otherDeclaredButNotPrivileged = submission.patchType === 'OTHER' && !isPrivileged;
-  const declaredTypeForValidation: PatchTypeValue | null = otherDeclaredButNotPrivileged
-    ? null
-    : (submission.patchType as PatchTypeValue | null);
-
-  const validation = validatePatchUpload(bytes, declaredTypeForValidation);
-  if (!validation.ok) {
-    const message = otherDeclaredButNotPrivileged
-      ? 'Only an admin or verifier can confirm and attach a patch declared as "Other" — please ask a moderator to review and upload this file.'
-      : validation.reason;
-    return NextResponse.json({ error: message }, { status: 422 });
-  }
-  const detectedType = validation.detectedType as PatchTypeValue;
-
-  if (!hadPriorFile) {
-    // First attachment: cross-check against whatever was already
-    // declared, if anything (fieldLimits.ts's patchSha1 regex is
-    // case-insensitive and doesn't normalize, so this compares
-    // lowercased). A privileged replace (below, hadPriorFile === true)
-    // deliberately skips this — nothing to sensibly cross-check a
-    // replacement against.
-    if (submission.patchType && detectedType !== submission.patchType) {
-      return NextResponse.json(
-        {
-          error: `This file looks like a ${patchTypeLabel(detectedType)} patch, but ${patchTypeLabel(submission.patchType)} was selected for this submission. Double-check the patch type, or leave it blank and this upload will set it.`,
-          // Structured alongside the message above so a client can offer a
-          // direct "use the detected type" fix instead of only rendering
-          // text (see PatchFileUpload.tsx). Purely additive — anything
-          // that only reads `error` behaves exactly as it did before.
-          // This is NOT a claim that the detected byte format is somehow
-          // more "correct" than what's declared — it's just the format
-          // the actual bytes really are, per detectPatchFormat(). Very
-          // often the honest explanation for this mismatch is that the
-          // real-world file simply doesn't match its own extension (e.g.
-          // a BPS patch someone named/renamed "*.ips" — a common mix-up
-          // in the wild, not evidence of anything wrong with detection).
-          patchTypeMismatch: { declaredType: submission.patchType, detectedType },
-        },
-        { status: 422 }
-      );
-    }
-    if (submission.patchSha1 && computedSha1 !== submission.patchSha1.toLowerCase()) {
-      return NextResponse.json(
-        {
-          error:
-            "This file's SHA-1 doesn't match the hash already recorded for this submission's " +
-            'patch. Re-drop the file into the patch details section first so the hash and file ' +
-            'agree, then upload again — or clear that field and this upload will set it.',
-        },
-        { status: 422 }
-      );
-    }
-  }
-
-  const effectiveType = detectedType;
-  const effectiveSha1 = computedSha1;
-  // A replace always uses the new file's own name; a first attachment
-  // prefers whatever was already declared (so a deliberately-chosen
-  // display name from the metadata step isn't clobbered by, say, a
-  // downloaded file literally named "patch.bps").
-  const effectiveFilename = hadPriorFile ? file.name : submission.patchFilename || file.name;
-
-  // hackName/version are required fields on Submission — always present,
-  // no fallback needed. Recomputed fresh on every (re-)upload (reflects
-  // the CURRENT hackName/version, not whatever they were on a previous
-  // upload) then PERSISTED (not recomputed on read) — see section 2au.
-  const displaySlug = buildPatchDisplaySlug(submission.hackName, submission.version);
-
-  try {
-    await writePatchFile(effectiveSha1, effectiveType, displaySlug, bytes);
-  } catch (err) {
-    console.error('[patch upload] failed to write patch file to storage:', err);
-    return NextResponse.json(
-      { error: 'Failed to store the patch file — please try again.' },
-      { status: 500 }
-    );
-  }
-
-  // Clean up the file this upload just superseded, if there was one AND
-  // its identity actually differs from the new one. "Differs" has to
-  // check all three of sha1/type/slug, not just sha1: the slug alone can
-  // change between uploads (a hackName/version edit landing between two
-  // uploads of the byte-identical patch) and would otherwise silently
-  // orphan the old-slug file on disk even though the hash never changed.
-  // Best-effort and non-blocking on purpose: the new file is already
-  // safely written and the database is about to point at it, so a
-  // cleanup failure here is a disk-space leak, not a correctness problem
-  // for anyone using the submission going forward — logged loudly rather
-  // than left silent, but never fails the request over it.
-  if (
-    hadPriorFile &&
-    submission.patchSha1 &&
-    submission.patchType &&
-    (submission.patchSha1.toLowerCase() !== effectiveSha1 ||
-      submission.patchType !== effectiveType ||
-      submission.patchStoredSlug !== displaySlug)
-  ) {
-    try {
-      await deletePatchFile(
-        submission.patchSha1.toLowerCase(),
-        submission.patchType,
-        submission.patchStoredSlug || 'patch'
-      );
-    } catch (err) {
-      console.error(
-        '[patch upload] failed to clean up the superseded patch file (new upload still succeeded):',
-        err
-      );
-    }
-  }
-
-  const updated = await prisma.submission.update({
-    where: { id: submission.id },
-    data: {
-      patchType: effectiveType,
-      patchFilename: effectiveFilename,
-      patchSha1: effectiveSha1,
-      patchFileSize: bytes.length,
-      patchUploadedAt: new Date(),
-      patchUploadedById: session.user.id,
-      patchStoredSlug: displaySlug,
-    },
-    select: {
-      id: true,
-      patchType: true,
-      patchFilename: true,
-      patchSha1: true,
-      patchFileSize: true,
-      patchUploadedAt: true,
-      patchStoredSlug: true,
-    },
+  // Everything from here — validation (incl. the privileged-only 'OTHER'
+  // escape hatch), the declared-type / declared-hash cross-checks, storing
+  // the file, cleaning up a superseded one, and recording it on the
+  // submission — lives in finalizePatchUpload (patchUploadFinalize.ts), the
+  // single implementation shared with the chunked upload's /complete step.
+  // It moved there verbatim; this handler only supplies WHERE THE BYTES ARE
+  // (an in-memory Buffer, hence sampleFromBuffer + writePatchFile).
+  const result = await finalizePatchUpload({
+    submission,
+    hadPriorFile,
+    user: { id: session.user.id, role: session.user.role },
+    fileName: file.name,
+    sample: sampleFromBuffer(bytes),
+    sha1: computedSha1,
+    store: (dest) => writePatchFile(dest.relativePath, bytes),
   });
-
-  return NextResponse.json({ success: true, submission: updated }, { status: 200 });
+  if (!result.ok) {
+    return NextResponse.json(result.body, { status: result.status });
+  }
+  return NextResponse.json({ success: true, submission: result.submission }, { status: 200 });
 }
 
 export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
@@ -357,11 +248,7 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
   }
 
   try {
-    await deletePatchFile(
-      submission.patchSha1.toLowerCase(),
-      submission.patchType,
-      submission.patchStoredSlug || 'patch'
-    );
+    await deletePatchFile(storedPatchRef(submission));
   } catch (err) {
     console.error('[patch remove] failed to delete the stored file:', err);
     return NextResponse.json({ error: 'Failed to remove the stored file — please try again.' }, { status: 500 });
@@ -371,7 +258,7 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
   // those describe the DECLARED/expected patch identity, meaningful on
   // their own even with no file attached (same as before section 2as ever
   // existed). Only the upload-tracking fields (file existence, size,
-  // who/when, on-disk slug) get cleared. Clearing patchUploadedAt also
+  // who/when, on-disk location) get cleared. Clearing patchUploadedAt also
   // reopens the owner-while-PENDING path for a fresh upload, if the
   // submission is still PENDING.
   const updated = await prisma.submission.update({
@@ -381,6 +268,7 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
       patchUploadedAt: null,
       patchUploadedById: null,
       patchStoredSlug: null,
+      patchStoredPath: null,
     },
     select: { id: true, patchUploadedAt: true },
   });
@@ -419,11 +307,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
   let bytes: Buffer;
   try {
-    bytes = await readPatchFile(
-      submission.patchSha1.toLowerCase(),
-      submission.patchType,
-      submission.patchStoredSlug || 'patch'
-    );
+    bytes = await readPatchFile(storedPatchRef(submission));
   } catch (err) {
     console.error('[patch download] failed to read the stored file:', err);
     return NextResponse.json({ error: 'The patch file could not be read from storage.' }, { status: 500 });

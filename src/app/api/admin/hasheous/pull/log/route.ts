@@ -44,9 +44,9 @@ export async function GET(req: NextRequest) {
   }
   lines.push('');
 
-  lines.push(`=== NOT FOUND (${job.notFoundResults.length}) — no match in Hasheous for this hash ===`);
+  lines.push(`=== NOT FOUND (${job.notFoundResults.length}) — no match in Hasheous for this hash, unless a reason is shown (then the lookup itself FAILED and says nothing about the hash) ===`);
   for (const r of job.notFoundResults) {
-    lines.push(`${r.hackName}\t${r.sha1}`);
+    lines.push(r.error ? `${r.hackName}\t${r.sha1}\tLOOKUP FAILED: ${r.error}` : `${r.hackName}\t${r.sha1}`);
   }
 
   const text = lines.join('\n');

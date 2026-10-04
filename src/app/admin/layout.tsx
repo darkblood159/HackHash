@@ -5,7 +5,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { ShieldCheck, Users, Inbox, UploadCloud, Pencil, Globe, Layers, Disc3, Package, Settings, DatabaseBackup, Library, UserSquare2 } from 'lucide-react';
+import { ShieldCheck, Users, Inbox, UploadCloud, Pencil, Globe, Layers, Disc3, Package, Settings, DatabaseBackup, Library, UserSquare2, ListPlus } from 'lucide-react';
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await getServerSession(authOptions);
@@ -50,6 +50,9 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         </Link>
         <Link href="/admin/import" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
           <UploadCloud size={14} /> Import DAT
+        </Link>
+        <Link href="/admin/batches" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
+          <ListPlus size={14} /> Bulk batches
         </Link>
         <Link href="/admin/change-requests" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
           <Pencil size={14} /> Change requests

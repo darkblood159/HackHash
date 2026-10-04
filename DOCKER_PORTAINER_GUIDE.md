@@ -194,32 +194,71 @@ you've already changed.
 
 Two different things in this app can hit a size limit on a big upload — a
 patch file attached to a submission, and a DAT file imported through the
-admin panel. Both can fail for either (or both) of two separate reasons,
-so if one of these errors out on a large file, check both:
+admin panel. DAT imports don't have a size cap — they're capped by how many
+entries fit in one request instead, and ImportDatForm.tsx already sends
+large imports in batches for that reason. The rest of this section is about
+**patch files**.
 
-**1. The app's own limit.** Patch uploads default to a 2GB ceiling
-(`PATCH_MAX_UPLOAD_BYTES`, in bytes — e.g. `3221225472` for 3GB). To raise
-it, add it as an environment variable to the `app` service in your
+### Cloudflare's per-request limit (and why patch uploads are chunked)
+
+Cloudflare limits how big a *single request* can be when a site is proxied
+through it (the orange cloud): **100MB on Free and Pro, 200MB on Business,
+500MB on Enterprise** by default. That limit is enforced before a request
+ever reaches your server, and it can't be raised on Free/Pro — so a 2GB
+patch can never get through as one request.
+
+The app handles this itself, with nothing to configure: a patch bigger than
+32MB is automatically sent as a series of ~50MB pieces, each its own small
+request, and reassembled on the server. If the connection drops it resumes
+where it stopped (and picking the same file again after a page refresh
+continues the same upload). Files up to 32MB still go up as one request,
+as before.
+
+- **In-progress uploads** are kept in a `.incoming` folder *inside*
+  `PATCH_STORAGE_DIR` (so on the same disk/bind mount as the finished
+  patches). Abandoned ones are deleted automatically after 24 hours of no
+  activity. It is safe to delete that folder by hand while the app is
+  stopped. A user can have at most 2 uploads in progress at once, and an
+  upload is refused up front if the disk doesn't have room for it (plus a
+  256MB cushion).
+- **`PATCH_UPLOAD_CHUNK_BYTES`** (optional, in bytes, default `52428800` =
+  50MB, clamped to 1MB–512MB): the piece size. Lower it if a proxy in front
+  of the app rejects requests smaller than 50MB or you're on a very slow
+  uplink; raise it only if you are *not* behind Cloudflare. Add it to the
+  `app` service the same way as the other variables below.
+- If an upload keeps failing partway with "the connection kept dropping",
+  check any timeouts on the proxy in front of the app; the person can pick
+  the same file again to continue from where it stopped.
+
+### The app's own limits
+
+Patch uploads default to a **2GB ceiling** (2,147,483,647 bytes) and that is
+also the **hard maximum**: `PATCH_MAX_UPLOAD_BYTES` can lower it (in bytes,
+e.g. `1073741824` for 1GB) but a value above 2,147,483,647 is clamped down
+with a warning in the logs, because the database column that records a
+patch's size is a 32-bit integer. Supporting bigger patches needs that
+column changed to BigInt (a schema migration) — see CLAUDE_HANDOFF.txt.
+To set it, add it as an environment variable to the `app` service in your
 Portainer stack (same place `NEXTAUTH_SECRET` etc. already live), then
-Recreate the container. DAT imports don't have an equivalent size cap —
-they're capped by how many entries fit in one request instead, and
-ImportDatForm.tsx already sends large imports in batches for that reason.
+Recreate the container.
 
-**2. `client_max_body_size`, if you're behind Nginx Proxy Manager (or
-similar).** This is a *separate* limit, enforced by the proxy in front of
-the app, and it defaults to a fairly small value (often 1MB) — meaning it
-can reject a large upload before that request ever reaches the app at
-all, regardless of what `PATCH_MAX_UPLOAD_BYTES` is set to. If a patch
-upload fails immediately with a generic error (rather than the app's own
-"File is larger than the Xmb limit" message), this is almost always why.
-In Nginx Proxy Manager: edit the relevant Proxy Host → **Advanced** tab →
-add
+### `client_max_body_size`, if you're behind Nginx Proxy Manager (or similar)
+
+This is a *separate* limit, enforced by your reverse proxy, and it defaults
+to a fairly small value (often 1MB) — meaning it can reject an upload before
+it reaches the app at all. If a patch upload fails immediately with a
+generic error (rather than the app's own "File is larger than the Xmb limit"
+message), this is almost always why. In Nginx Proxy Manager: edit the
+relevant Proxy Host → **Advanced** tab → add
 ```
-client_max_body_size 2048M;
+client_max_body_size 100M;
 ```
-(adjust the number to comfortably exceed whatever `PATCH_MAX_UPLOAD_BYTES`
-is set to) → **Save**. A different reverse proxy will have its own
-equivalent setting under a different name.
+→ **Save**. Since large patches now arrive in ~50MB pieces, this only has to
+be comfortably larger than one piece (or `PATCH_UPLOAD_CHUNK_BYTES` if you
+changed it), not larger than the biggest patch. If you previously set it to
+`2048M`, it's fine to leave it — nothing breaks, it's just no longer
+necessary. A different reverse proxy will have its own equivalent setting
+under a different name.
 
 ---
 

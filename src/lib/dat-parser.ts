@@ -42,6 +42,12 @@ export interface ParsedDatEntry {
   // source, which never had patch data at all — the import route falls
   // back to recomputing a slug from hackName/version in that case.
   patchStoredSlug?: string;
+  // Where the file sat inside patch storage, relative to the storage root
+  // (folder layout — see Submission.patchStoredPath). Same lifecycle as
+  // patchStoredSlug above: present only for a detailed export made after this
+  // field was added; the import route validates it before using it and falls
+  // back to computing/looking up locations when it's absent.
+  patchStoredPath?: string;
   // The base rom this entry's patch expects, if the source database had
   // one recorded (see src/lib/baseRom.ts) — present only for a "detailed"
   // export re-import. status is carried through so re-importing an already-
@@ -255,6 +261,7 @@ export function parseDatJson(jsonText: string): ParsedDatEntry[] {
         ...(d?.patch?.filename ? { patchFilename: String(d.patch.filename).trim() } : {}),
         ...(d?.patch?.sha1 ? { patchSha1: String(d.patch.sha1).trim() } : {}),
         ...(d?.patch?.storedSlug ? { patchStoredSlug: String(d.patch.storedSlug).trim() } : {}),
+        ...(d?.patch?.storedPath ? { patchStoredPath: String(d.patch.storedPath).trim() } : {}),
         ...(d?.baseRom?.name && d?.baseRom?.sha1 && d?.baseRom?.crc32 && d?.baseRom?.md5
           ? {
               baseRom: {

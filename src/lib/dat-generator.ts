@@ -94,7 +94,7 @@ interface DetailedEntry {
       filename: string | null;
       sha1: string | null;
       // The exact slug baked into the stored file's name on disk
-      // ({sha1}__{storedSlug}.{ext} — see src/lib/patchStorage.ts),
+      // (...{slug}__{sha1}.{ext} — see src/lib/patchStorage.ts),
       // persisted at upload time rather than the CURRENT hackName/version
       // (which a later rename could have changed). Included specifically
       // so a re-import of this export can find the physical file again
@@ -102,6 +102,12 @@ interface DetailedEntry {
       // null whenever no file has actually been uploaded (patchUploadedAt
       // unset), same as the three fields above.
       storedSlug: string | null;
+      // Where the file sits inside patch storage, relative to the storage
+      // root (Platform/Base ROM/Hack/file — Submission.patchStoredPath), so a
+      // re-import can find the physical file again exactly. null for a file
+      // still in the old flat layout (the slug above locates those) and,
+      // like the fields above, whenever no file is attached.
+      storedPath: string | null;
     };
     // Reference to the UNPATCHED source ROM this hack's patch expects —
     // separate from the top-level crc32/md5/sha1 on the entry itself, which
@@ -333,10 +339,12 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
           filename: sub?.patchFilename ?? null,
           sha1: sub?.patchSha1 ?? null,
           // Only ever non-null when a file is actually attached
-          // (patchUploadedAt set) — patchStoredSlug is cleared back to
-          // null by DELETE /api/submissions/[id]/patch whenever the file
-          // itself is removed, so this needs no separate check here.
+          // (patchUploadedAt set) — patchStoredSlug/patchStoredPath are
+          // cleared back to null by DELETE /api/submissions/[id]/patch
+          // whenever the file itself is removed, so this needs no separate
+          // check here.
           storedSlug: sub?.patchStoredSlug ?? null,
+          storedPath: sub?.patchStoredPath ?? null,
         },
         baseRom: sub?.baseRom
           ? {
