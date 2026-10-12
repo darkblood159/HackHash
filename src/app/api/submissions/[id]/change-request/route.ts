@@ -38,7 +38,8 @@ const changeRequestSchema = z.object({
   // Whether an approved hackName/author/releaseYear/releaseDate/description change here
   // should fan out to every other version of this hack, or apply to just
   // this submission. Set by the requester; the approve action honors it
-  // as-is. Defaults true — "these should match unless told otherwise".
+  // as-is. Defaults FALSE (Oct 12): a request filed against one version only
+  // touches that version unless the requester explicitly opts in.
   applyToAllVersions: z.boolean().optional(),
   // Proposed tag slugs, full-replace semantics on approval — same idea as
   // the direct-edit PATCH route's tags handling, just deferred until an
@@ -266,7 +267,7 @@ export async function POST(
       requestedById: session.user.id,
       changes: stripMappingValues(parsed.data.changes as Record<string, unknown>) as any,
       reason: parsed.data.reason,
-      applyToAllVersions: parsed.data.applyToAllVersions ?? true,
+      applyToAllVersions: parsed.data.applyToAllVersions ?? false,
       proposedTags: parsed.data.proposedTags !== undefined ? (parsed.data.proposedTags as any) : undefined,
       proposedTranslationLanguages: parsed.data.proposedTranslationLanguages !== undefined ? (parsed.data.proposedTranslationLanguages as any) : undefined,
       proposedFamily: parsed.data.proposedFamily !== undefined ? (parsed.data.proposedFamily as any) : undefined,
@@ -285,7 +286,7 @@ export async function POST(
       details: {
         changes: parsed.data.changes,
         reason: parsed.data.reason,
-        applyToAllVersions: parsed.data.applyToAllVersions ?? true,
+        applyToAllVersions: parsed.data.applyToAllVersions ?? false,
         proposedTags: parsed.data.proposedTags,
         proposedTranslationLanguages: parsed.data.proposedTranslationLanguages,
         proposedFamily: parsed.data.proposedFamily,

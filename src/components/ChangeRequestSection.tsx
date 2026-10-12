@@ -18,6 +18,7 @@ import { authorsCacheString } from '@/lib/authorList';
 import { TagsEditor } from './TagsEditor';
 import { LanguagePicker } from './LanguagePicker';
 import { TRANSLATION_TRIGGER_SLUGS } from '@/lib/tags';
+import { isSharedFieldKey } from '@/lib/hackFamily';
 import { languageName } from '@/lib/languages';
 import { FIELD_LABELS, describeValidationError } from '@/lib/fieldLabels';
 import { PATCH_TYPES, patchTypeLabel } from '@/lib/patchTypes';
@@ -98,6 +99,16 @@ function proposedAuthorList(raw: ChangeRequest['proposedAuthor']): Array<{ id: s
   return raw.id ? [{ id: raw.id, name: raw.name }] : [];
 }
 
+// True only when approving `r` could actually touch sibling versions through
+// applyToAllVersions: a shared-field edit (hackName/author/releaseYear/
+// releaseDate/description) or a tag change. A request that only changes
+// per-version fields (version, changelog, patch info, URLs, platform...) has
+// nothing to fan out, so the "every version" warning must not show for it.
+// Franchise/author proposals have their own banners below.
+function requestHasFamilySyncedChanges(r: Pick<ChangeRequest, 'changes' | 'proposedTags'>): boolean {
+  return Object.keys(r.changes ?? {}).some(isSharedFieldKey) || (r.proposedTags !== null && r.proposedTags !== undefined);
+}
+
 export function ChangeRequestSection({ submissionId, status, current, currentMapping, currentFamily = null, currentBaseRom = null, currentFranchise = null, currentAuthors = [], currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions, fileInfo, verificationScore }: ChangeRequestSectionProps) {
   const router = useRouter();
   const [requests, setRequests] = useState(initialRequests);
@@ -132,7 +143,11 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
   const authorChanged = !sameAuthorList(selectedAuthors, currentAuthors);
   const [tagsForm, setTagsForm] = useState<string[]>(currentTags);
   const [translationLanguagesForm, setTranslationLanguagesForm] = useState<string[]>(currentTranslationLanguages);
-  const [applyToAllVersions, setApplyToAllVersions] = useState(true);
+  // Opt-in, default OFF: a request filed from one version's page is about
+  // THAT version unless the requester deliberately ticks the box. (It used
+  // to default ON, which fanned every shared-field edit out to all sibling
+  // versions on approval — see the Oct 12 bug fix in CHANGELOG.md.)
+  const [applyToAllVersions, setApplyToAllVersions] = useState(false);
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -566,7 +581,7 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
                 )}
               </div>
               {r.reason && <p className="text-xs text-text-muted mt-1.5 italic">"{r.reason}"</p>}
-              {hasOtherVersions && r.applyToAllVersions !== false && r.status === 'PENDING' && (
+              {hasOtherVersions && r.applyToAllVersions !== false && r.status === 'PENDING' && requestHasFamilySyncedChanges(r) && (
                 <p className="text-xs text-phosphor mt-1">Approving this will apply the shared-field changes to every version of this hack.</p>
               )}
               {r.proposedFamily !== undefined && r.proposedFamily !== null && r.status === 'PENDING' && (
