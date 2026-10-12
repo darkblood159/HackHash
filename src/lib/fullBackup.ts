@@ -152,6 +152,7 @@ export async function generateFullBackup(
     datImports,
     submissionBatches,
     submissions,
+    submissionAuthors,
     changeRequests,
     approvedEntries,
     verifications,
@@ -175,6 +176,7 @@ export async function generateFullBackup(
     prisma.datImport.findMany(),
     prisma.submissionBatch.findMany(),
     prisma.submission.findMany(),
+    prisma.submissionAuthor.findMany(),
     prisma.changeRequest.findMany(),
     prisma.approvedEntry.findMany(),
     prisma.verification.findMany(),
@@ -214,6 +216,7 @@ export async function generateFullBackup(
     datImports: datImports,
     submissionBatches: submissionBatches,
     submissions: submissions.map((s) => ({ ...s, fileSize: s.fileSize.toString() })),
+    submissionAuthors: submissionAuthors,
     changeRequests: changeRequests,
     approvedEntries: approvedEntries.map((e) => ({ ...e, fileSize: e.fileSize.toString() })),
     verifications: verifications,
@@ -261,13 +264,17 @@ const RESTORE_ORDER = [
   'baseRoms',
   // Before 'submissions' — Submission.franchiseId is a foreign key to this.
   'franchises',
-  // Before 'submissions' too — Submission.authorId is a foreign key to this.
+  // Before 'submissions' too — SubmissionAuthor.authorId is a foreign key to this
+  // (and, listed after 'submissions', so is SubmissionAuthor.submissionId).
   'authors',
   'datImports',
   // Before 'submissions' too — Submission.batchId is a foreign key to this.
   // (WIPE_ORDER is this list reversed, so submissions are deleted first.)
   'submissionBatches',
   'submissions',
+  // After 'submissions' AND 'authors' — SubmissionAuthor has foreign keys to both
+  // (WIPE_ORDER is this list reversed, so these links are deleted before either).
+  'submissionAuthors',
   // After 'submissions' and 'users' — ChangeRequest.submissionId and
   // .requestedById are both foreign keys to those, and (unlike most FKs in
   // this app) both ON DELETE RESTRICT rather than SET NULL/CASCADE, so this
@@ -306,7 +313,9 @@ const WIPE_ORDER = [...RESTORE_ORDER].reverse();
 // 'authors' is optional for the same reason 'franchises' is: a backup taken before the Author
 // list shipped has no "authors" key, and that's a complete, valid backup of the schema as it was then.
 // 'submissionBatches' likewise: a backup taken before bulk submit shipped has no such key.
-const OPTIONAL_TABLES = ['franchises', 'authors', 'submissionBatches', 'changeRequests'] as const;
+// 'submissionAuthors' likewise: a backup taken before a hack could credit several authors has no such
+// key — validatePayload rebuilds it from each submission's old single `authorId` (see there).
+const OPTIONAL_TABLES = ['franchises', 'authors', 'submissionBatches', 'submissionAuthors', 'changeRequests'] as const;
 
 // tx.model.deleteMany({}) for a table name that isn't a Prisma delegate
 // (there isn't one — this list is hand-matched 1:1 against RESTORE_ORDER
@@ -324,6 +333,7 @@ const MODEL_FOR_KEY: Record<string, string> = {
   datImports: 'datImport',
   submissionBatches: 'submissionBatch',
   submissions: 'submission',
+  submissionAuthors: 'submissionAuthor',
   changeRequests: 'changeRequest',
   approvedEntries: 'approvedEntry',
   verifications: 'verification',
@@ -394,7 +404,11 @@ const ROW_MAPPERS: Record<string, (r: any) => any> = {
   authors: (a) => ({ ...a, approvedAt: parseDate(a.approvedAt), createdAt: parseDateReq(a.createdAt) }),
   datImports: (d) => ({ ...d, reversedAt: parseDate(d.reversedAt), createdAt: parseDateReq(d.createdAt) }),
   submissionBatches: (b) => ({ ...b, reversedAt: parseDate(b.reversedAt), createdAt: parseDateReq(b.createdAt) }),
-  submissions: (s) => ({
+  submissions: ({ authorId: _legacyAuthorId, ...s }) => ({
+    // authorId was a Submission column until hacks could credit several
+    // authors; it's destructured OUT here because createMany would reject the
+    // now-unknown column in a backup taken before that change (those links are
+    // carried over by validatePayload instead).
     ...s,
     fileSize: bi(s.fileSize),
     releaseDate: parseDate(s.releaseDate),
@@ -412,6 +426,7 @@ const ROW_MAPPERS: Record<string, (r: any) => any> = {
   // handling of their own — they only ever hold plain strings/booleans/null
   // (see the schema comments on each), which JSON.stringify/parse already
   // round-trip correctly on their own.
+  submissionAuthors: (a) => ({ submissionId: a.submissionId, authorId: a.authorId, position: a.position ?? 0 }),
   changeRequests: (c) => ({
     id: c.id,
     submissionId: c.submissionId,
@@ -479,6 +494,18 @@ function validatePayload(payload: any): asserts payload is FullBackupPayload {
   }
   if (!payload.data || typeof payload.data !== 'object') {
     throw new FullBackupValidationError('Backup file is missing its "data" section.');
+  }
+  // A backup taken before a hack could credit several authors carries the old
+  // single link as `authorId` on each submission row and has no
+  // submissionAuthors table. Rebuild it from those (position 0) so restoring
+  // one keeps its author links instead of silently dropping them — only when
+  // the table is absent: a backup that HAS the table is authoritative, and a
+  // submission row with a stray authorId in a new-format file is ignored (the
+  // submissions mapper strips it).
+  if (payload.data.submissionAuthors === undefined && Array.isArray(payload.data.submissions)) {
+    payload.data.submissionAuthors = payload.data.submissions
+      .filter((s: any) => s && typeof s.authorId === 'string' && s.authorId !== '')
+      .map((s: any) => ({ submissionId: s.id, authorId: s.authorId, position: 0 }));
   }
   for (const key of OPTIONAL_TABLES) {
     if (payload.data[key] === undefined) payload.data[key] = [];

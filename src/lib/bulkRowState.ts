@@ -69,7 +69,8 @@ export interface BulkHeader {
   translationLanguages: string[];
   mappings: MappingValues;
   baseRomId: string | null;
-  authorId: string | null;
+  /** The picked Authors' ids in credit order (empty = none picked). */
+  authorIds: string[];
   /** Only while nothing was picked from the Author list — same rule as the single form. */
   legacyAuthor: string | null;
   franchiseId: string | null;
@@ -215,8 +216,8 @@ export function buildCreatePayload(args: {
   const payload: Record<string, unknown> = {
     hackName: header.hackName.trim(),
     version: row.version.trim(),
-    authorId: header.authorId ?? undefined,
-    author: !header.authorId && header.legacyAuthor ? header.legacyAuthor : undefined,
+    authorIds: header.authorIds.length > 0 ? header.authorIds : undefined,
+    author: header.authorIds.length === 0 && header.legacyAuthor ? header.legacyAuthor : undefined,
     releaseDate: row.releaseDate || undefined,
     platform: header.platform,
     sourceUrl: effectiveSourceUrl(row, header),

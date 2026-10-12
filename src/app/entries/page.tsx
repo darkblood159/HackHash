@@ -11,6 +11,8 @@ import { PatchFilters } from '@/components/PatchFilters';
 import { EntriesSearchBox } from '@/components/EntriesSearchBox';
 import { FranchiseFilter } from '@/components/FranchiseFilter';
 import { getFranchiseFilterOptions } from '@/lib/franchise';
+import { AUTHORS_SELECT, flattenAuthors, submissionAuthorFilter } from '@/lib/author';
+import { AuthorLinks } from '@/components/AuthorLinks';
 import { PLATFORMS } from '@/types';
 // Note: TagFilters is intentionally NOT on this page. Most entries come from
 // DAT imports which don't assign tags to submissions — filtering the entries
@@ -113,7 +115,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
       ...(hasPatch === 'yes' ? { patchUploadedAt: { not: null } } : {}),
       ...(hasPatch === 'no' ? { patchUploadedAt: null } : {}),
       ...(franchiseFilter ? { franchiseId: franchiseFilter.id } : {}),
-      ...(author ? { author: { equals: author, mode: 'insensitive' as const } } : {}),
+      ...(author ? submissionAuthorFilter(author) : {}),
     },
     ...(searchConditions.length ? { OR: searchConditions } : {}),
     ...(platform ? { platform: platform as any } : {}),
@@ -141,6 +143,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
         select: {
           hackName: true,
           author: true,
+          authors: AUTHORS_SELECT,
           releaseYear: true,
           releaseDate: true,
           hackFamilyId: true,
@@ -301,9 +304,12 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
                 </td>
                 <td className="px-4 py-3"><PlatformBadge platform={entry.platform} size="sm" /></td>
                 <td className="px-4 py-3 text-text-muted hidden sm:table-cell">{entry.submission.author ? (
-                    <Link href={`/entries?author=${encodeURIComponent(entry.submission.author)}`} className="hover:text-phosphor hover:underline">
-                      {entry.submission.author}
-                    </Link>
+                    <AuthorLinks
+                      authors={flattenAuthors(entry.submission.authors)}
+                      fallback={entry.submission.author}
+                      basePath="/entries"
+                      linkClassName="hover:text-phosphor hover:underline"
+                    />
                   ) : '—'}</td>
                 <td className="px-4 py-3 hidden lg:table-cell">
                   <div className="flex gap-1 flex-wrap">

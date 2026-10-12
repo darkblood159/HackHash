@@ -47,6 +47,19 @@ export const authOptions: NextAuthOptions = {
           DiscordProvider({
             clientId: process.env.DISCORD_CLIENT_ID!,
             clientSecret: process.env.DISCORD_CLIENT_SECRET!,
+            // Discord now adds an RFC 9207 `iss` parameter to its OAuth
+            // redirects (its published metadata at
+            // https://discord.com/.well-known/openid-configuration says
+            // issuer "https://discord.com" and
+            // authorization_response_iss_parameter_supported: true).
+            // openid-client, inside next-auth v4, compares that value with
+            // the provider's configured issuer and throws "issuer must be
+            // configured on the issuer" when there isn't one — and
+            // next-auth's built-in Discord provider sets none (its GitHub
+            // one does, since 4.24.14), so every Discord sign-in failed
+            // with OAUTH_CALLBACK_ERROR. A redirect naming any OTHER issuer
+            // is still rejected ("iss mismatch").
+            issuer: 'https://discord.com',
             // Same reasoning as GitHub above, EXCEPT Discord's own API
             // explicitly exposes a `verified: boolean` on the user object
             // whenever the `email` scope is granted (which this provider

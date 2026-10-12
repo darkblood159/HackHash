@@ -67,11 +67,19 @@ export interface ParsedDatEntry {
     name: string;
     status?: string;
   };
-  // The Author row this entry was linked to in the source database, if any
-  // — present only for a "detailed" export re-import, and absent for a
-  // submission whose author was only ever plain text (that still arrives
-  // through the plain `author` field like always). status carried through
-  // so an already-approved author isn't reset to pending, same as franchise.
+  // The Author rows this entry was linked to in the source database, in
+  // credit order — present only for a "detailed" export re-import from a build
+  // that supports several authors per hack, and absent for a submission whose
+  // author was only ever plain text (that still arrives through the plain
+  // `author` field like always). status carried through so an
+  // already-approved author isn't reset to pending, same as franchise.
+  authors?: Array<{
+    name: string;
+    status?: string;
+  }>;
+  // The single-author form of the above, from an export made before a hack
+  // could credit several (and still written by this build, as authors[0], so
+  // the file imports into an older one). Only read when `authors` is absent.
   authorRef?: {
     name: string;
     status?: string;
@@ -280,6 +288,18 @@ export function parseDatJson(jsonText: string): ParsedDatEntry[] {
                 name: String(d.franchise.name).trim(),
                 ...(d.franchise.status ? { status: String(d.franchise.status).trim() } : {}),
               },
+            }
+          : {}),
+        ...(Array.isArray(d?.authors) && d.authors.length
+          ? {
+              // Same defensive shape as the other optional blocks: an entry
+              // without a usable name is dropped rather than failing the import.
+              authors: d.authors
+                .filter((a: any) => a && typeof a.name === 'string' && a.name.trim())
+                .map((a: any) => ({
+                  name: String(a.name).trim(),
+                  ...(a.status ? { status: String(a.status).trim() } : {}),
+                })),
             }
           : {}),
         ...(d?.authorRef?.name

@@ -8,7 +8,7 @@ import { isMappingFieldKey } from '@/lib/mappingFields';
 import { isSharedFieldKey, propagateSharedFields, propagateTags, reassignSubmissionFamily, FamilyReassignError, resolveReleaseFields } from '@/lib/hackFamily';
 import { reassignSubmissionBaseRom, BaseRomAssignError } from '@/lib/baseRom';
 import { reassignSubmissionFranchise, FranchiseAssignError } from '@/lib/franchise';
-import { reassignSubmissionAuthor, AuthorAssignError } from '@/lib/author';
+import { reassignSubmissionAuthors, normalizeProposedAuthors, AuthorAssignError } from '@/lib/author';
 import { resolveMachineName, triggerHasheousPushForSubmission } from '@/lib/approval';
 import { ensureTagsExist } from '@/lib/tags';
 
@@ -28,7 +28,7 @@ export async function POST(
 
   const changeRequest = await prisma.changeRequest.findUnique({
     where: { id: params.id },
-    include: { submission: true },
+    include: { submission: { include: { authors: { select: { authorId: true } } } } },
   });
   if (!changeRequest) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -90,16 +90,20 @@ export async function POST(
   }
 
   // A plain-text author change with no proposedAuthor alongside it, on a
-  // submission that's linked to an Author row: the typed name no longer
-  // matches the linked row, so unlink it (text untouched — it becomes the
-  // legacy "plain text, no link" state) rather than leave a link a later
-  // rename/merge of that Author would use to overwrite the text. Same
-  // reasoning as the matching block in the direct-edit PATCH route. A
-  // proposedAuthor, when present, is applied further down and wins.
-  const hasAuthorProposal = changeRequest.proposedAuthor !== null && changeRequest.proposedAuthor !== undefined;
+  // submission that's linked to Author rows: the typed text no longer
+  // matches the linked rows, so remove the links (text untouched — it becomes
+  // the legacy "plain text, no link" state) rather than leave links a later
+  // rename/merge of one of those Authors would use to overwrite the text.
+  // Same reasoning as the matching block in the direct-edit PATCH route. A
+  // proposedAuthor, when present, is applied further down and wins. (The
+  // links are SubmissionAuthor rows, so this is a delete in the transaction
+  // below, not a field in the `changes` bag.)
+  // normalizeProposedAuthors reads either stored shape (old single-author
+  // proposals are still sitting in PENDING rows) — never read the JSON directly.
+  const proposedAuthors = normalizeProposedAuthors(changeRequest.proposedAuthor);
+  const hasAuthorProposal = proposedAuthors !== null;
   const unlinkAuthorOnTextEdit =
-    'author' in changes && !hasAuthorProposal && !!changeRequest.submission.authorId && changes.author !== changeRequest.submission.author;
-  if (unlinkAuthorOnTextEdit) changes.authorId = null;
+    'author' in changes && !hasAuthorProposal && changeRequest.submission.authors.length > 0 && changes.author !== changeRequest.submission.author;
 
   const hasSubmissionChanges = Object.keys(changes).length > 0;
   const hasMappingChanges = Object.keys(mappingChanges).length > 0;
@@ -122,6 +126,10 @@ export async function POST(
       const updated = hasSubmissionChanges
         ? await tx.submission.update({ where: { id: changeRequest.submissionId }, data: changes as any })
         : changeRequest.submission;
+
+      if (unlinkAuthorOnTextEdit) {
+        await tx.submissionAuthor.deleteMany({ where: { submissionId: changeRequest.submissionId } });
+      }
 
       if (hasSubmissionChanges && changeRequest.submission.status === 'APPROVED' && renameFieldsChanged) {
         const approvedEntry = await tx.approvedEntry.findUnique({ where: { submissionId: changeRequest.submissionId } });
@@ -185,12 +193,11 @@ export async function POST(
       if (changeRequest.submission.hackFamilyId && changeRequest.applyToAllVersions) {
         if (hasSharedChanges) {
           await propagateSharedFields(tx, changeRequest.submission.hackFamilyId, changeRequest.submissionId, sharedChanges);
-          // The new plain name just fanned out, so every other version's
-          // link to an Author row is stale for the same reason — clear it.
+          // The new plain text just fanned out, so every other version's
+          // links to Author rows are stale for the same reason — remove them.
           if (unlinkAuthorOnTextEdit) {
-            await tx.submission.updateMany({
-              where: { hackFamilyId: changeRequest.submission.hackFamilyId, id: { not: changeRequest.submissionId } },
-              data: { authorId: null },
+            await tx.submissionAuthor.deleteMany({
+              where: { submission: { hackFamilyId: changeRequest.submission.hackFamilyId, id: { not: changeRequest.submissionId } } },
             });
           }
         }
@@ -254,22 +261,20 @@ export async function POST(
         await reassignSubmissionFranchise(tx, changeRequest.submissionId, proposed.id, session.user.id, changeRequest.applyToAllVersions);
       }
 
-      // Author change — same shape and same null-is-valid reasoning as the
+      // Author change — same shape and same none-is-valid reasoning as the
       // franchise block just above, honoring applyToAllVersions the same
       // way. Runs AFTER the generic `changes` bag was applied earlier in
       // this transaction, deliberately: if a request somehow carried both a
       // plain changes.author string and a proposedAuthor, the linked Author
-      // row wins (reassignSubmissionAuthor writes the resolved row's name
+      // rows win (reassignSubmissionAuthors writes the resolved rows' names
       // over whatever string the bag just set), matching the direct-edit
-      // PATCH route's authorId-beats-author precedence.
-      // reassignSubmissionAuthor() re-validates the target by id (never
-      // trusting the proposal's name snapshot), reads the submission's
+      // PATCH route's linked-authors-beat-author-text precedence.
+      // reassignSubmissionAuthors() re-validates the targets by id (never
+      // trusting the proposal's name snapshots), reads the submission's
       // CURRENT family, and keeps Submission.author's denormalized string
       // cache in sync — see src/lib/author.ts.
-      const hasAuthorChange = changeRequest.proposedAuthor !== null && changeRequest.proposedAuthor !== undefined;
-      if (hasAuthorChange) {
-        const proposed = changeRequest.proposedAuthor as { id: string | null; name: string | null };
-        await reassignSubmissionAuthor(tx, changeRequest.submissionId, proposed.id, session.user.id, changeRequest.applyToAllVersions);
+      if (proposedAuthors) {
+        await reassignSubmissionAuthors(tx, changeRequest.submissionId, proposedAuthors.map((a) => a.id), session.user.id, changeRequest.applyToAllVersions);
       }
 
       await tx.changeRequest.update({

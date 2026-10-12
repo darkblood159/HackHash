@@ -15,7 +15,8 @@ import { describeValidationError } from '@/lib/fieldLabels';
 import { FamilyPicker, type SelectedFamily } from './FamilyPicker';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
 import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
-import { AuthorPicker, type SelectedAuthor } from './AuthorPicker';
+import { AuthorsPicker, sameAuthorList, type SelectedAuthor } from './AuthorsPicker';
+import { authorsCacheString } from '@/lib/authorList';
 import { SubmissionPreviewOverlay, type SubmissionPreviewData, type SubmissionPreviewFields } from './SubmissionPreview';
 
 interface AdminEditPanelProps {
@@ -52,8 +53,8 @@ interface AdminEditPanelProps {
   currentFamily?: SelectedFamily | null;
   currentBaseRom?: SelectedBaseRom | null;
   currentFranchise?: SelectedFranchise | null;
-  // The Author row this submission is linked to, or null — including for every submission whose author was typed as plain text before the Author list existed (initial.author still holds that text).
-  currentAuthor?: SelectedAuthor | null;
+  // The Author rows this submission is linked to, in credit order — empty for every submission whose author was typed as plain text before the Author list existed (initial.author still holds that text).
+  currentAuthors?: SelectedAuthor[];
   hasOtherVersions?: boolean; // whether this hack has sibling versions to sync with
   // Read-only, for the preview only — never edited by this panel, but
   // real, always-visible content on the actual page (File metadata card,
@@ -64,7 +65,7 @@ interface AdminEditPanelProps {
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
 
-export function AdminEditPanel({ submissionId, status, initial, mapping, tags, currentFamily = null, currentBaseRom = null, currentFranchise = null, currentAuthor = null, hasOtherVersions, fileInfo, verificationScore }: AdminEditPanelProps) {
+export function AdminEditPanel({ submissionId, status, initial, mapping, tags, currentFamily = null, currentBaseRom = null, currentFranchise = null, currentAuthors = [], hasOtherVersions, fileInfo, verificationScore }: AdminEditPanelProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({
@@ -87,14 +88,15 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
   const [selectedFamily, setSelectedFamily] = useState<SelectedFamily | null>(currentFamily);
   const [selectedBaseRom, setSelectedBaseRom] = useState<SelectedBaseRom | null>(currentBaseRom);
   const [selectedFranchise, setSelectedFranchise] = useState<SelectedFranchise | null>(currentFranchise);
-  const [selectedAuthor, setSelectedAuthor] = useState<SelectedAuthor | null>(currentAuthor);
-  // Plain diff, same reasoning as franchiseChanged in save() below (author is
-  // optional, AuthorPicker's "Change" keeps the old value until a new one is
-  // actually picked). Note a submission with only a legacy plain-text author
-  // has currentAuthor null AND starts with selectedAuthor null, so merely
-  // opening the panel is NOT a change — the existing text is left untouched
-  // unless someone actually picks, adds, or removes an author.
-  const authorChanged = (selectedAuthor?.id ?? null) !== (currentAuthor?.id ?? null);
+  const [selectedAuthors, setSelectedAuthors] = useState<SelectedAuthor[]>(currentAuthors);
+  // Plain diff of the ordered list, same reasoning as franchiseChanged in
+  // save() below (authors are optional, so an empty list is a normal value). A
+  // reorder counts as a change — order is the credit order. Note a submission
+  // with only a legacy plain-text author has currentAuthors [] AND starts with
+  // selectedAuthors [], so merely opening the panel is NOT a change — the
+  // existing text is left untouched unless someone actually picks, adds, or
+  // removes an author.
+  const authorChanged = !sameAuthorList(selectedAuthors, currentAuthors);
   const [applyToAllVersions, setApplyToAllVersions] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -222,7 +224,8 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
             applyToAllVersions,
             ...(baseRomChanged ? { baseRomId: selectedBaseRom!.id } : {}),
             ...(franchiseChanged ? { franchiseId: selectedFranchise?.id ?? null } : {}),
-            ...(authorChanged ? { authorId: selectedAuthor?.id ?? null } : {}),
+            // The complete ordered list (the server replaces the links with it); [] removes them all.
+            ...(authorChanged ? { authorIds: selectedAuthors.map((a) => a.id) } : {}),
             ...mappingPayload,
           }),
         });
@@ -301,8 +304,8 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
       version: form.version,
       platform: form.platform,
       // Falls back to the untouched original text when the picker wasn't used — otherwise a
-      // legacy plain-text author (no linked Author row) would preview as "cleared".
-      author: authorChanged ? (selectedAuthor?.name ?? null) : initial.author,
+      // legacy plain-text author (no linked Author rows) would preview as "cleared".
+      author: authorChanged ? authorsCacheString(selectedAuthors.map((a) => a.name)) : initial.author,
       releaseYear,
       releaseDate,
       description: form.description || null,
@@ -361,16 +364,16 @@ export function AdminEditPanel({ submissionId, status, initial, mapping, tags, c
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="block text-xs text-text-muted mb-1">Author</label>
-            {!currentAuthor && initial.author && !selectedAuthor && (
+            <label className="block text-xs text-text-muted mb-1">Author(s)</label>
+            {currentAuthors.length === 0 && initial.author && selectedAuthors.length === 0 && (
               <p className="text-[11px] text-text-muted mb-1">
                 On file as plain text: &ldquo;{initial.author}&rdquo; (not linked to the author list). Left as-is unless you pick one below.
               </p>
             )}
-            <AuthorPicker
-              value={selectedAuthor}
-              onChange={setSelectedAuthor}
-              initialQuery={!currentAuthor && initial.author ? initial.author : undefined}
+            <AuthorsPicker
+              value={selectedAuthors}
+              onChange={setSelectedAuthors}
+              initialQuery={currentAuthors.length === 0 && initial.author ? initial.author : undefined}
             />
           </div>
           <div>

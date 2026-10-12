@@ -36,7 +36,7 @@ import { LANGUAGE_CODES } from '@/lib/languages';
 import { resolveOrCreateFamily, propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
 import { validateFranchiseAssignment, propagateFranchise, FranchiseAssignError } from '@/lib/franchise';
-import { validateAuthorAssignment, propagateAuthor, AuthorAssignError, type AuthorSummary } from '@/lib/author';
+import { validateAuthorAssignments, propagateAuthors, authorsCacheString, AuthorAssignError, MAX_AUTHORS_PER_SUBMISSION, type AuthorSummary } from '@/lib/author';
 import { getBulkLimitsForUser, countBatchRows, BatchError } from '@/lib/submissionBatch';
 import { describeIsBaseRom, versionKey } from '@/lib/bulkChecks';
 
@@ -45,12 +45,12 @@ export const createSubmissionSchema = z.object({
   version: z.string().min(1).max(50),
   description: z.string().max(5000).optional(),
   versionChangelog: z.string().max(3000).optional(),
-  // Free-text fallback, used only when authorId (below) isn't sent —
-  // author linking through the shared Author list is the primary path
-  // going forward (see SubmitForm's AuthorPicker), but this stays accepted
-  // for anything hitting this API directly without going through that
-  // picker. Ignored (overridden server-side) whenever authorId IS present
-  // — see the authorId handling below for why.
+  // Free-text fallback, used only when no linked authors (authorIds /
+  // authorId below) are sent — author linking through the shared Author list
+  // is the primary path going forward (see SubmitForm's AuthorsPicker), but
+  // this stays accepted for anything hitting this API directly without going
+  // through that picker. Ignored (overridden server-side) whenever linked
+  // authors ARE present — see the author handling below for why.
   author: z.string().min(1).max(200).optional(),
   releaseYear: z.number().int().min(1990).max(new Date().getFullYear() + 1).optional(),
   // Full release date, when actually known — 'YYYY-MM-DD', same bounds as
@@ -85,13 +85,19 @@ export const createSubmissionSchema = z.object({
   // proposing a brand-new one happens via POST /api/franchises before the
   // form gets here, same as base roms via POST /api/base-roms.
   franchiseId: z.string().min(1).optional(),
-  // OPTIONAL, same shape as franchiseId — references an EXISTING Author row
-  // (see src/lib/author.ts); proposing a brand-new one happens via POST
-  // /api/authors before the form gets here. When present, this WINS over
-  // the plain `author` string above — the resolved Author row's current
-  // name becomes the submission's `author` value, never whatever string
-  // happened to also be sent (see Submission.authorId's schema comment for
-  // why `author` has to stay an accurate cache).
+  // OPTIONAL — references EXISTING Author rows (see src/lib/author.ts), in
+  // credit order: the first is the primary credit. Proposing a brand-new
+  // author happens via POST /api/authors before the form gets here. When
+  // present, this WINS over the plain `author` string above — the resolved
+  // Author rows' current names, joined, become the submission's `author`
+  // value, never whatever string happened to also be sent (see
+  // Submission.authors' schema comment for why `author` has to stay an
+  // accurate cache). Repeats are dropped server-side (first wins).
+  authorIds: z.array(z.string().min(1)).max(MAX_AUTHORS_PER_SUBMISSION).optional(),
+  // DEPRECATED single-author form of authorIds, from before multi-author
+  // support. Still accepted so a page that was open across the deploy (or an
+  // API caller written against the old shape) keeps working; used only when
+  // authorIds isn't sent. New code sends authorIds.
   authorId: z.string().min(1).optional(),
   notes: z.string().max(5000).optional(),
   releasePageUrl: z.string().url().optional().or(z.literal('')),
@@ -187,15 +193,16 @@ export async function createSubmissionCore(
     }
   }
 
-  // authorId: same courtesy-validate-before-writing-anywhere treatment as
-  // franchiseId above. When present, authorTarget.name below is what
-  // actually gets written to the submission's `author` column — the
-  // resolved Author row's CURRENT name, never data.author, even if a
-  // caller also sent one (see this field's own schema comment).
-  let authorTarget: AuthorSummary | null = null;
-  if (data.authorId) {
+  // authorIds: same courtesy-validate-before-writing-anywhere treatment as
+  // franchiseId above. When present, the names of authorTargets below are
+  // what actually gets written to the submission's `author` column — the
+  // resolved Author rows' CURRENT names, never data.author, even if a caller
+  // also sent one (see this field's own schema comment).
+  let authorTargets: AuthorSummary[] = [];
+  const requestedAuthorIds = data.authorIds ?? (data.authorId ? [data.authorId] : []);
+  if (requestedAuthorIds.length > 0) {
     try {
-      authorTarget = await validateAuthorAssignment(prisma, data.authorId);
+      authorTargets = await validateAuthorAssignments(prisma, requestedAuthorIds);
     } catch (err) {
       if (err instanceof AuthorAssignError) {
         throw new SubmissionCreateError(400, { error: err.message });
@@ -203,7 +210,7 @@ export async function createSubmissionCore(
       throw err;
     }
   }
-  const resolvedAuthor = authorTarget ? authorTarget.name : (data.author ?? null);
+  const resolvedAuthor = authorTargets.length > 0 ? authorsCacheString(authorTargets.map((t) => t.name)) : (data.author ?? null);
 
   // Normalize hashes to lowercase
   const sha1 = data.sha1.toLowerCase();
@@ -254,7 +261,11 @@ export async function createSubmissionCore(
       // worth blocking a whole submission over.
       translationLanguages: (data.translationLanguages ?? []).filter((c) => LANGUAGE_CODES.includes(c)),
       author: resolvedAuthor,
-      authorId: authorTarget?.id ?? null,
+      // Nested create so the links and the submission are written together in
+      // one transaction (Prisma nested writes) — a submission whose `author` string
+      // names people it isn't linked to can't be left behind by a failure
+      // between two separate writes.
+      authors: authorTargets.length > 0 ? { create: authorTargets.map((t, position) => ({ authorId: t.id, position })) } : undefined,
       releaseYear: release.releaseYear,
       releaseDate: release.releaseDate,
       platform: data.platform,
@@ -346,13 +357,14 @@ export async function createSubmissionCore(
         }
         // Same "only when actually chosen" reasoning as franchiseId above —
         // and, unlike franchiseId, this also keeps the siblings' `author`
-        // string in sync (see propagateAuthor's own comment). The generic
+        // string in sync (see propagateAuthors' own comment). The generic
         // propagateSharedFields call just above already pushed the same
-        // resolved name out as a plain string; this additionally links
-        // each sibling's authorId so they don't just show the right name
-        // but are actually linked to the same governed Author row.
-        if (authorTarget) {
-          await propagateAuthor(tx, familyId, submission.id, authorTarget);
+        // resolved string out as plain text; this additionally links each
+        // sibling to the same governed Author rows (replacing whatever list
+        // it had), so they don't just show the right names but are actually
+        // linked.
+        if (authorTargets.length > 0) {
+          await propagateAuthors(tx, familyId, submission.id, authorTargets);
         }
       });
     } catch (err: any) {

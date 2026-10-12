@@ -38,10 +38,12 @@ export async function GET(req: NextRequest) {
     }),
     prisma.author.count({ where: { status: 'PENDING' } }),
     // groupBy rather than a filtered relation _count — same choice (and
-    // reasoning) as the matching query in the admin franchises route.
-    prisma.submission.groupBy({
+    // reasoning) as the matching query in the admin franchises route. Counts
+    // SubmissionAuthor links (one per hack the author is credited on) whose
+    // submission isn't soft-deleted.
+    prisma.submissionAuthor.groupBy({
       by: ['authorId'],
-      where: { authorId: { not: null }, deletedAt: null },
+      where: { submission: { deletedAt: null } },
       _count: { _all: true },
     }),
     // Legacy submissions with a credited author string but no linked Author
@@ -52,13 +54,13 @@ export async function GET(req: NextRequest) {
     // backfill route itself skips it safely) not to need a raw-SQL trim
     // here just for a display count.
     prisma.submission.count({
-      where: { authorId: null, author: { not: null }, deletedAt: null, NOT: { author: '' } },
+      where: { authors: { none: {} }, author: { not: null }, deletedAt: null, NOT: { author: '' } },
     }),
   ]);
 
   const usageById = new Map<string, number>();
   for (const u of usage) {
-    if (u.authorId) usageById.set(u.authorId, u._count._all);
+    usageById.set(u.authorId, u._count._all);
   }
 
   // submittedById is a plain column (no relation), so resolve names

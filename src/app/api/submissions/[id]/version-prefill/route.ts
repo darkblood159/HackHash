@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { AUTHORS_SELECT, flattenAuthors } from '@/lib/author';
 
 // GET /api/submissions/:id/version-prefill
 //
@@ -60,7 +61,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       gameMapping: true,
       baseRom: { select: { id: true, name: true, status: true, fileExtension: true } },
       franchise: { select: { id: true, name: true, status: true } },
-      authorRef: { select: { id: true, name: true, status: true } },
+      authors: AUTHORS_SELECT,
     },
   });
 
@@ -80,11 +81,10 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   return NextResponse.json({
     hackName: submission.hackName,
     platform: submission.platform,
-    // Linked Author row (or null) for the picker, plus the plain name as the fallback for a
-    // version whose author was never linked — see SubmitForm's legacyAuthor.
-    author: submission.authorRef
-      ? { id: submission.authorRef.id, name: submission.authorRef.name, status: submission.authorRef.status }
-      : null,
+    // Linked Author rows in credit order (empty when none) for the picker,
+    // plus the plain name as the fallback for a version whose author was never
+    // linked — see SubmitForm's legacyAuthor.
+    authors: flattenAuthors(submission.authors),
     authorName: submission.author,
     description: submission.description,
     sourceUrl: submission.sourceUrl,

@@ -4,7 +4,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
-import { cleanAuthorName, authorNameKey, AUTHOR_NAME_MAX } from '@/lib/author';
+import { cleanAuthorName, authorNameKey, AUTHOR_NAME_MAX, refreshAuthorCache, deleteAuthorAndRefreshCache } from '@/lib/author';
 
 const patchSchema = z
   .object({
@@ -20,13 +20,16 @@ const patchSchema = z
 // author — the right move there is merging the two, not renaming one into
 // the other's identity (see the merge route next door). Unlike renaming a
 // Franchise, a rename here ALSO has to update every submission currently
-// linked to this author (authorId = this row's id): Submission.author is a
-// denormalized cache of this row's name (see that field's comment in
-// prisma/schema.prisma), and a rename that didn't push through to it would
-// leave every linked hack silently showing the OLD name in search, DAT
-// export, and everywhere else that reads the string directly instead of
-// joining through authorRef. Both writes happen in one transaction so they
-// can't disagree even if the second half failed.
+// linked to this author (a SubmissionAuthor row pointing at this one):
+// Submission.author is a denormalized cache of its linked authors' names
+// (see that field's comment in prisma/schema.prisma), and a rename that
+// didn't push through to it would leave every linked hack silently showing
+// the OLD name in search, DAT export, and everywhere else that reads the
+// string directly instead of joining through the links. With several
+// authors per hack the string is rebuilt from ALL of a hack's links (not
+// just text-replaced), so a co-credited hack keeps its other names and its
+// order. Both writes happen in one transaction so they can't disagree even
+// if the second half failed.
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id || session.user.role !== 'ADMINISTRATOR') {
@@ -81,8 +84,10 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     renamedSubmissions = await prisma.$transaction(async (tx) => {
       await tx.author.update({ where: { id: params.id }, data });
       if (data.name !== undefined) {
-        const result = await tx.submission.updateMany({ where: { authorId: params.id }, data: { author: data.name } });
-        return result.count;
+        // Raw UPDATE inside refreshAuthorCache on purpose — a bookkeeping
+        // rewrite must not stamp "now" into Submission.updatedAt (hack-family
+        // aggregation reads it as "most recently edited").
+        return refreshAuthorCache(tx, { authorId: params.id });
       }
       return 0;
     });
@@ -123,16 +128,17 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 // project's usual soft-delete default that Franchise removal makes, for the
 // same reason: nameKey is globally unique, so a soft-deleted row would keep
 // occupying that name forever and block anyone from ever re-creating it.
-// Never blocked when submissions still use it: author is optional on a
-// submission, so the database's ON DELETE SET NULL simply unlinks them
-// (authorId only — see the FK on Submission.authorId). Deliberately does
-// NOT clear the affected submissions' `author` string: that column is
-// meaningful free text in its own right (it predates this entity and is
-// what search/export/display actually read), and losing the last-known
-// name just because the governed row behind it went away would be a real,
-// visible regression for something removal doesn't otherwise touch at all.
-// The audit entry records how many were unlinked so it's clear afterward
-// what a removal touched.
+// Never blocked when submissions still use it: authors are optional on a
+// submission, so the database's ON DELETE CASCADE on SubmissionAuthor simply
+// removes the links. A hack that credited ONLY this author keeps its
+// `author` string — that column is meaningful free text in its own right (it
+// predates this entity and is what search/export/display actually read), and
+// losing the last-known name just because the governed row behind it went
+// away would be a real, visible regression for something removal doesn't
+// otherwise touch at all. A hack that ALSO credits other authors has its
+// string rebuilt from the ones that remain, so the string never names someone
+// the hack is no longer linked to. The audit entry records how many links
+// were removed so it's clear afterward what a removal touched.
 export async function DELETE(_req: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.id || session.user.role !== 'ADMINISTRATOR') {
@@ -144,7 +150,9 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
 
-  const unlinkedSubmissions = await prisma.submission.count({ where: { authorId: params.id } });
+  // Read for the audit entry only; deleteAuthorAndRefreshCache below looks the
+  // affected hacks up again inside its own transaction (the one that matters).
+  const unlinkedSubmissions = await prisma.submissionAuthor.count({ where: { authorId: params.id } });
 
   // Audit first: AuditLog.details is plain Json with no FK to Author, so
   // the entry survives the row being gone with no orphan concern — same
@@ -157,7 +165,7 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
     },
   });
 
-  await prisma.author.delete({ where: { id: params.id } });
+  await prisma.$transaction((tx) => deleteAuthorAndRefreshCache(tx, params.id));
 
   return NextResponse.json({ ok: true, unlinkedSubmissions });
 }

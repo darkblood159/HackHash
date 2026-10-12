@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { toISODateOnly } from '@/lib/hackFamily';
+import { AUTHORS_SELECT, flattenAuthors } from '@/lib/author';
 
 // GET /api/entries/hack-family/[id]
 //
@@ -37,7 +38,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
           gameMapping: true,
           tags: { select: { tag: { select: { slug: true } } } },
           franchise: { select: { id: true, name: true, status: true } },
-          authorRef: { select: { id: true, name: true, status: true } },
+          authors: AUTHORS_SELECT,
         },
       },
     },
@@ -59,12 +60,14 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   const franchiseSource = [...family.submissions]
     .filter((s) => s.franchise)
     .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
-  // Author: same "most recently touched version that actually HAS a linked
-  // one" rule as franchise above. A family's plain `author` string (still
-  // returned below as authorName) is the fallback for the many hacks whose
-  // author was typed before the Author list existed and was never linked.
+  // Authors: same "most recently touched version that actually HAS linked
+  // ones" rule as franchise above — the whole ordered list is taken from that
+  // ONE version, never merged across versions. A family's plain `author`
+  // string (still returned below as authorName) is the fallback for the many
+  // hacks whose author was typed before the Author list existed and was never
+  // linked.
   const authorSource = [...family.submissions]
-    .filter((s) => s.authorRef)
+    .filter((s) => s.authors.length > 0)
     .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
 
   const m = mappingSource?.gameMapping;
@@ -72,10 +75,11 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   return NextResponse.json({
     name: family.name,
     platform: family.platform,
-    // The linked Author row (or null), same shape as `franchise` below — this is what the
-    // form's author picker is filled from. authorName is the plain-text fallback for a
-    // family with no linked author yet; see SubmitForm's legacyAuthor.
-    author: authorSource?.authorRef ?? null,
+    // The linked Author rows in credit order (empty when none are linked) —
+    // this is what the form's authors picker is filled from. authorName is
+    // the plain-text fallback for a family with no linked authors yet; see
+    // SubmitForm's legacyAuthor.
+    authors: authorSource ? flattenAuthors(authorSource.authors) : [],
     authorName: family.author,
     releaseYear: family.releaseYear,
     releaseDate: toISODateOnly(family.releaseDate),

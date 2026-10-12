@@ -10,7 +10,7 @@ import { MAPPING_FIELD_KEYS, stripMappingValues } from '@/lib/mappingFields';
 import { SHARED_FIELD_KEYS } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
 import { validateFranchiseAssignment, FranchiseAssignError } from '@/lib/franchise';
-import { validateAuthorAssignment, AuthorAssignError } from '@/lib/author';
+import { validateAuthorAssignments, normalizeProposedAuthors, AuthorAssignError, MAX_AUTHORS_PER_SUBMISSION } from '@/lib/author';
 import { ALL_TAG_SLUGS } from '@/lib/tags';
 import { LANGUAGE_CODES } from '@/lib/languages';
 
@@ -94,16 +94,24 @@ const changeRequestSchema = z.object({
     id: z.string().nullable(),
     name: z.string().nullable(),
   }).optional(),
-  // Proposed author change — same { id, name } display-snapshot shape and
-  // same null-id-is-valid reasoning as proposedFranchise just above (author
-  // is optional on a submission too). Re-validated against the live Author
-  // by id below and again at approval time (reassignSubmissionAuthor in
+  // Proposed author change: { authors: [{ id, name }, ...] } — the COMPLETE
+  // ordered list the hack should end up with ([] = remove every linked
+  // author), each name a display-only snapshot. Same optional-field reasoning
+  // as proposedFranchise just above. Re-validated against the live Author rows
+  // by id below and again at approval time (reassignSubmissionAuthors in
   // src/lib/author.ts, which also keeps Submission.author's denormalized
-  // string cache in sync).
-  proposedAuthor: z.object({
-    id: z.string().nullable(),
-    name: z.string().nullable(),
-  }).optional(),
+  // string cache in sync). The pre-multi-author single shape
+  // { id: string | null, name } is still accepted (a form open across the
+  // deploy) and converted; what gets STORED is always the new shape.
+  proposedAuthor: z.union([
+    z.object({
+      authors: z.array(z.object({ id: z.string().min(1), name: z.string().nullable() })).max(MAX_AUTHORS_PER_SUBMISSION),
+    }),
+    z.object({
+      id: z.string().nullable(),
+      name: z.string().nullable(),
+    }),
+  ]).optional(),
 }).refine(
   (data) => Object.keys(data.changes).length > 0 || data.proposedTags !== undefined || data.proposedTranslationLanguages !== undefined || data.proposedFamily !== undefined || data.proposedBaseRom !== undefined || data.proposedFranchise !== undefined || data.proposedAuthor !== undefined,
   { message: 'Propose at least one change — a field edit, a tag change, a family change, a base ROM change, a franchise change, or an author change' }
@@ -236,10 +244,13 @@ export async function POST(
   }
 
   // Same courtesy-check-now, authoritative-re-check-at-approval arrangement
-  // as proposedFranchise just above; null just means "remove it".
-  if (parsed.data.proposedAuthor?.id) {
+  // as proposedFranchise just above; an empty list just means "remove them".
+  // Normalised once here so everything below (the stored JSON, the audit log)
+  // sees the new shape regardless of which one the client sent.
+  const proposedAuthors = parsed.data.proposedAuthor !== undefined ? normalizeProposedAuthors(parsed.data.proposedAuthor) : null;
+  if (proposedAuthors && proposedAuthors.length > 0) {
     try {
-      await validateAuthorAssignment(prisma, parsed.data.proposedAuthor.id);
+      await validateAuthorAssignments(prisma, proposedAuthors.map((a) => a.id));
     } catch (err) {
       if (err instanceof AuthorAssignError) {
         return NextResponse.json({ error: err.message }, { status: err.status });
@@ -247,6 +258,7 @@ export async function POST(
       throw err;
     }
   }
+  const proposedAuthorJson: { authors: Array<{ id: string; name: string | null }> } | undefined = proposedAuthors ? { authors: proposedAuthors } : undefined;
 
   const changeRequest = await prisma.changeRequest.create({
     data: {
@@ -260,7 +272,7 @@ export async function POST(
       proposedFamily: parsed.data.proposedFamily !== undefined ? (parsed.data.proposedFamily as any) : undefined,
       proposedBaseRom: parsed.data.proposedBaseRom !== undefined ? (parsed.data.proposedBaseRom as any) : undefined,
       proposedFranchise: parsed.data.proposedFranchise !== undefined ? (parsed.data.proposedFranchise as any) : undefined,
-      proposedAuthor: parsed.data.proposedAuthor !== undefined ? (parsed.data.proposedAuthor as any) : undefined,
+      proposedAuthor: proposedAuthorJson as any,
     },
     include: {
       requestedBy: { select: { id: true, name: true, image: true } },
@@ -279,7 +291,7 @@ export async function POST(
         proposedFamily: parsed.data.proposedFamily,
         proposedBaseRom: parsed.data.proposedBaseRom,
         proposedFranchise: parsed.data.proposedFranchise,
-        proposedAuthor: parsed.data.proposedAuthor,
+        proposedAuthor: proposedAuthorJson,
       },
       userId: session.user.id,
       submissionId: params.id,

@@ -3,13 +3,13 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
-import { cleanAuthorName, authorNameKey, resolveOrCreateAuthor } from '@/lib/author';
+import { cleanAuthorName, authorNameKey, resolveOrCreateAuthor, refreshAuthorCache } from '@/lib/author';
 
 // POST /api/admin/authors/backfill
 //
 // One-time (but safe to re-run) linking pass for submissions that predate
 // the Author list, or were imported/edited outside the picker: any
-// submission with a free-text `author` but no authorId yet. Same shape as
+// submission with a free-text `author` but no linked Author rows yet. Same shape as
 // /api/admin/hack-families/backfill, adapted for Author's extra denormalized
 // text column (see the long comment atop src/lib/author.ts).
 //
@@ -33,7 +33,7 @@ import { cleanAuthorName, authorNameKey, resolveOrCreateAuthor } from '@/lib/aut
 // whichever of several spellings a given submission happened to be typed
 // with originally.
 //
-// Only touches submissions with authorId still null and a non-blank author
+// Only touches submissions with NO linked authors and a non-blank author
 // string, so it's safe to call again later (e.g. after a bulk DAT import
 // adds more legacy rows) — already-linked submissions are left alone.
 // Soft-deleted submissions (deletedAt set) are excluded, same convention the
@@ -45,7 +45,7 @@ export async function POST(_req: NextRequest) {
   }
 
   const candidates = await prisma.submission.findMany({
-    where: { authorId: null, author: { not: null }, deletedAt: null },
+    where: { authors: { none: {} }, author: { not: null }, deletedAt: null },
     select: { id: true, author: true, updatedAt: true },
   });
 
@@ -122,9 +122,18 @@ export async function POST(_req: NextRequest) {
       else if (resolved.promoted) authorsPromoted++;
       else authorsReused++;
 
-      await prisma.submission.updateMany({
-        where: { id: { in: members.map((m) => m.id) } },
-        data: { authorId: resolved.authorId, author: resolved.name },
+      // The links plus the `author` string rewrite go in together, so a
+      // failure can't leave text claiming a canonical name the rows aren't
+      // linked to. The text is rewritten by refreshAuthorCache (raw UPDATE),
+      // not a Prisma update, so the backfill no longer stamps "now" into
+      // every linked submission's updatedAt.
+      const memberIds = members.map((m) => m.id);
+      await prisma.$transaction(async (tx) => {
+        await tx.submissionAuthor.createMany({
+          data: memberIds.map((submissionId) => ({ submissionId, authorId: resolved.authorId, position: 0 })),
+          skipDuplicates: true,
+        });
+        await refreshAuthorCache(tx, { submissionIds: memberIds });
       });
       submissionsLinked += members.length;
     } catch (err: any) {

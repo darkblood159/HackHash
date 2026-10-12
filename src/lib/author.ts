@@ -11,20 +11,26 @@
 // See that file's own top comment for the full "why" behind each layer of
 // dedupe; it isn't repeated here.
 //
-// The one real difference from Franchise: Submission already had a plain
-// free-text `author` STRING column (see that field's long comment in
-// prisma/schema.prisma) long before this entity existed, and it's far too
-// deeply read elsewhere (search, the DAT export/import, the
-// /submissions?author=... exact-match filter link, HackFamily's shared-
-// field propagation) to replace. So every function here that changes
-// authorId also keeps that string column in sync as a denormalized cache of
-// the linked Author's CURRENT name — resolved fresh from the Author row,
-// never trusted from a caller-supplied string. Franchise has no such string
-// to keep in sync, which is why propagateFranchise/reassignSubmissionFranchise
-// only ever touch one column where the equivalents here touch two.
+// The real differences from Franchise:
+//  1. Submission already had a plain free-text `author` STRING column (see
+//     that field's long comment in prisma/schema.prisma) long before this
+//     entity existed, and it's far too deeply read elsewhere (search, the DAT
+//     export/import, HackFamily's shared-field propagation) to replace. So
+//     every function here that changes a submission's authors also keeps that
+//     string column in sync as a denormalized cache of the linked Authors'
+//     CURRENT names — resolved fresh from the Author rows, never trusted from
+//     a caller-supplied string. Franchise has no such string to keep in sync.
+//  2. A hack can credit SEVERAL authors (the SubmissionAuthor join table,
+//     ordered by `position`), where it has at most one franchise. The cache
+//     string is the names joined in that order with AUTHOR_SEPARATOR.
 
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { similarityThreshold } from './hackFamily';
+import { MAX_AUTHORS_PER_SUBMISSION, AUTHOR_SEPARATOR, authorsCacheString } from './authorList';
+
+// Re-exported so server code keeps one import path; the definitions live in
+// the zero-import authorList.ts so browser components can use them too.
+export { MAX_AUTHORS_PER_SUBMISSION, AUTHOR_SEPARATOR, authorsCacheString };
 
 // Same pragmatic choice as franchise.ts/baseRom.ts/hackFamily.ts — `any`
 // covers both a real $transaction callback client and the top-level `prisma`
@@ -316,84 +322,327 @@ export async function searchAuthors(
   };
 }
 
-// ─── Assignment (putting an author on an existing submission) ───────────────
+// ─── Assignment (putting authors on an existing submission) ─────────────────
 
-// Validates a proposed target before it's written anywhere — a clean 4xx
-// instead of a raw foreign-key violation (a confusing 500) if the row was
-// removed or merged away since the picker loaded it. `client` accepts
-// either the plain prisma client (a read-only pre-check) or an open
-// transaction, same trick validateFranchiseAssignment/validateBaseRomAssignment
-// use. PENDING is allowed — a submission isn't blocked on its author's own
-// review finishing.
-export async function validateAuthorAssignment(client: TxClient, authorId: string): Promise<AuthorSummary> {
-  const target = await client.author.findUnique({
-    where: { id: authorId },
+// Validates a proposed ordered list before it's written anywhere — a clean
+// 4xx instead of a raw foreign-key violation (a confusing 500) if a row was
+// removed or merged away since the picker loaded it. Drops repeats (first
+// occurrence wins, so the order the person chose is kept) and refuses more
+// than MAX_AUTHORS_PER_SUBMISSION. `client` accepts either the plain prisma
+// client (a read-only pre-check) or an open transaction, same trick
+// validateFranchiseAssignment/validateBaseRomAssignment use. PENDING is
+// allowed — a submission isn't blocked on its authors' own review finishing.
+// An empty list is valid (it means "no linked authors") and returns [].
+export async function validateAuthorAssignments(client: TxClient, authorIds: string[]): Promise<AuthorSummary[]> {
+  const ids: string[] = [];
+  for (const id of authorIds) {
+    if (typeof id !== 'string' || id === '') {
+      throw new AuthorAssignError('Invalid author', 400);
+    }
+    if (!ids.includes(id)) ids.push(id);
+  }
+  if (ids.length > MAX_AUTHORS_PER_SUBMISSION) {
+    throw new AuthorAssignError(`A hack can credit at most ${MAX_AUTHORS_PER_SUBMISSION} authors.`, 422);
+  }
+  if (ids.length === 0) return [];
+
+  const rows: Array<{ id: string; name: string; status: string }> = await client.author.findMany({
+    where: { id: { in: ids } },
     select: { id: true, name: true, status: true },
   });
-  if (!target) {
-    throw new AuthorAssignError('That author no longer exists — please pick it again.', 422);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const missing = ids.filter((id) => !byId.has(id));
+  if (missing.length > 0) {
+    throw new AuthorAssignError(
+      ids.length === 1
+        ? 'That author no longer exists — please pick it again.'
+        : 'One of those authors no longer exists — please pick them again.',
+      422
+    );
   }
-  return { id: target.id, name: target.name, status: target.status as AuthorStatusValue };
+  // Re-emit in the REQUESTED order (findMany makes no ordering promise).
+  return ids.map((id) => {
+    const r = byId.get(id)!;
+    return { id: r.id, name: r.name, status: r.status as AuthorStatusValue };
+  });
+}
+
+// Replaces ONE submission's author links with exactly `targets`, in order
+// (position 0, 1, 2…). Writes the join rows only — the caller puts
+// authorsCacheString(...) into `author` as part of its own submission write
+// (every caller already has one), so this never touches the Submission row
+// itself (and so never bumps its updatedAt). An empty list removes every link.
+export async function setSubmissionAuthors(tx: TxClient, submissionId: string, targets: AuthorSummary[]): Promise<void> {
+  await tx.submissionAuthor.deleteMany({ where: { submissionId } });
+  if (targets.length > 0) {
+    await tx.submissionAuthor.createMany({
+      data: targets.map((t, position) => ({ submissionId, authorId: t.id, position })),
+    });
+  }
 }
 
 // Full-replace author sync to every OTHER version of a hack — same
 // "family-shared, propagated at write time" treatment propagateFranchise
-// gives franchiseId, EXCEPT this also keeps the legacy `author` string
-// column in sync on every sibling it touches (target?.name, or null when
-// clearing), since — unlike franchiseId — there's a second column here that
-// needs to keep telling the truth. `target` null clears both columns on the
-// siblings too.
-export async function propagateAuthor(
+// gives franchiseId, EXCEPT this also keeps the `author` string cache in sync
+// on every sibling it touches (the joined names, or null when clearing),
+// since — unlike franchiseId — there's a second column here that needs to
+// keep telling the truth. An empty `targets` clears both on the siblings too.
+// A user-driven edit, so (like propagateSharedFields next to it) the sibling
+// rows' updatedAt moves — not a bookkeeping job, see refreshAuthorCache for
+// those.
+export async function propagateAuthors(
   tx: TxClient,
   familyId: string,
   excludeSubmissionId: string,
-  target: AuthorSummary | null
+  targets: AuthorSummary[]
 ): Promise<void> {
-  await tx.submission.updateMany({
+  const siblings: Array<{ id: string }> = await tx.submission.findMany({
     where: { hackFamilyId: familyId, id: { not: excludeSubmissionId } },
-    data: { authorId: target?.id ?? null, author: target?.name ?? null },
+    select: { id: true },
+  });
+  if (siblings.length === 0) return;
+  const ids = siblings.map((s) => s.id);
+
+  await tx.submissionAuthor.deleteMany({ where: { submissionId: { in: ids } } });
+  if (targets.length > 0) {
+    await tx.submissionAuthor.createMany({
+      data: ids.flatMap((submissionId) => targets.map((t, position) => ({ submissionId, authorId: t.id, position }))),
+    });
+  }
+  await tx.submission.updateMany({
+    where: { id: { in: ids } },
+    data: { author: authorsCacheString(targets.map((t) => t.name)) },
   });
 }
 
 // Standalone apply step for the change-request approval route — validates,
-// writes both authorId AND the denormalized author string, optionally fans
-// out to the rest of the family, and logs. Reads the submission's CURRENT
+// writes the links AND the denormalized author string, optionally fans out to
+// the rest of the family, and logs. Reads the submission's CURRENT
 // hackFamilyId itself instead of trusting a caller-supplied one, same
 // reasoning reassignSubmissionFranchise documents (a family reassignment
 // earlier in the same approval transaction may have just changed it). The
 // direct-edit PATCH route (src/app/api/submissions/[id]/route.ts) doesn't
-// use this — it folds authorId into its own already-in-flight update, same
-// reasoning franchise.ts documents for reassignSubmissionFranchise.
-export async function reassignSubmissionAuthor(
+// use this — it folds the author string into its own already-in-flight
+// update, same reasoning franchise.ts documents for reassignSubmissionFranchise.
+export async function reassignSubmissionAuthors(
   tx: TxClient,
   submissionId: string,
-  authorId: string | null,
+  authorIds: string[],
   actorId: string,
   applyToFamily: boolean
 ): Promise<void> {
-  const target = authorId ? await validateAuthorAssignment(tx, authorId) : null;
+  const targets = await validateAuthorAssignments(tx, authorIds);
 
-  const current: { authorId: string | null; hackFamilyId: string | null } | null = await tx.submission.findUnique({
+  const current: { hackFamilyId: string | null; authors: Array<{ authorId: string }> } | null = await tx.submission.findUnique({
     where: { id: submissionId },
-    select: { authorId: true, hackFamilyId: true },
+    select: { hackFamilyId: true, authors: { select: { authorId: true }, orderBy: { position: 'asc' } } },
   });
   if (!current) throw new AuthorAssignError('Submission not found', 404);
 
-  // Server-resolved name, never a caller-supplied string — see this file's
+  // Server-resolved names, never caller-supplied strings — see this file's
   // top comment on why `author` has to stay an accurate cache.
-  await tx.submission.update({ where: { id: submissionId }, data: { authorId: target?.id ?? null, author: target?.name ?? null } });
+  await setSubmissionAuthors(tx, submissionId, targets);
+  await tx.submission.update({
+    where: { id: submissionId },
+    data: { author: authorsCacheString(targets.map((t) => t.name)) },
+  });
 
   const fannedOut = applyToFamily && !!current.hackFamilyId;
   if (fannedOut) {
-    await propagateAuthor(tx, current.hackFamilyId as string, submissionId, target);
+    await propagateAuthors(tx, current.hackFamilyId as string, submissionId, targets);
   }
 
   await tx.auditLog.create({
     data: {
       action: 'SUBMISSION_AUTHOR_CHANGED',
-      details: { from: current.authorId, to: authorId, toName: target?.name ?? null, appliedToAllVersions: fannedOut },
+      details: {
+        from: current.authors.map((a) => a.authorId),
+        to: targets.map((t) => t.id),
+        toNames: targets.map((t) => t.name),
+        appliedToAllVersions: fannedOut,
+      },
       userId: actorId,
       submissionId,
     },
   });
+}
+
+// ─── Keeping the cache honest after bulk author changes ─────────────────────
+
+// Rewrites Submission.author from the CURRENT links for the given submissions
+// (or for every submission linked to `authorId` — what a rename needs). Pure
+// bookkeeping, so it is a raw UPDATE on purpose: a Prisma update would stamp
+// "now" into Submission.updatedAt, which hack-family aggregation reads as
+// "most recently edited" (see the updatedAt lesson in CLAUDE_HANDOFF.txt
+// section 12). Only submissions that still have at least one link are
+// touched — one left with NONE keeps its text, which is the legacy "plain
+// text, no link" state, exactly what removing an Author has always done.
+// Returns how many rows it rewrote. SQL twin of authorsCacheString(): the
+// separator is passed in as a parameter from the same constant.
+export async function refreshAuthorCache(
+  tx: TxClient,
+  scope: { submissionIds: string[] } | { authorId: string }
+): Promise<number> {
+  if ('submissionIds' in scope) {
+    if (scope.submissionIds.length === 0) return 0;
+    return tx.$executeRaw`
+      UPDATE "Submission" AS s
+      SET "author" = agg."names"
+      FROM (
+        SELECT sa."submissionId" AS "id",
+               string_agg(a."name", ${AUTHOR_SEPARATOR}::text ORDER BY sa."position", a."name") AS "names"
+        FROM "SubmissionAuthor" sa
+        JOIN "Author" a ON a."id" = sa."authorId"
+        WHERE sa."submissionId" = ANY(${scope.submissionIds}::text[])
+        GROUP BY sa."submissionId"
+      ) agg
+      WHERE s."id" = agg."id" AND s."author" IS DISTINCT FROM agg."names"`;
+  }
+  return tx.$executeRaw`
+    UPDATE "Submission" AS s
+    SET "author" = agg."names"
+    FROM (
+      SELECT sa."submissionId" AS "id",
+             string_agg(a."name", ${AUTHOR_SEPARATOR}::text ORDER BY sa."position", a."name") AS "names"
+      FROM "SubmissionAuthor" sa
+      JOIN "Author" a ON a."id" = sa."authorId"
+      WHERE sa."submissionId" IN (SELECT "submissionId" FROM "SubmissionAuthor" WHERE "authorId" = ${scope.authorId})
+      GROUP BY sa."submissionId"
+    ) agg
+    WHERE s."id" = agg."id" AND s."author" IS DISTINCT FROM agg."names"`;
+}
+
+// ─── Merging and deleting (the link-moving halves) ──────────────────────────
+
+// Moves every hack credited to `fromId` over to `intoId` and rebuilds those
+// hacks' `author` string. Does NOT delete the "from" Author row or write the
+// audit entry — the merge route does that around this, in the same
+// transaction. Two cases per hack:
+//  - it credits only "from": the link is re-pointed at "into", keeping its
+//    position in that hack's order;
+//  - it ALREADY credits "into" as well (a hack can credit several authors):
+//    the redundant "from" link is dropped instead — (submissionId, authorId)
+//    is the primary key, so re-pointing it would collide — and "into" keeps
+//    its own place in that hack's order.
+// Positions can be left with a gap by that second case; only their ORDER is
+// ever read, so that's harmless.
+export async function mergeAuthorLinks(
+  tx: TxClient,
+  fromId: string,
+  intoId: string
+): Promise<{ affectedIds: string[]; alreadyCreditedTarget: number }> {
+  const fromLinks: Array<{ submissionId: string }> = await tx.submissionAuthor.findMany({
+    where: { authorId: fromId },
+    select: { submissionId: true },
+  });
+  const affectedIds = fromLinks.map((l) => l.submissionId);
+
+  const alsoHaveTarget: Array<{ submissionId: string }> = affectedIds.length
+    ? await tx.submissionAuthor.findMany({
+        where: { authorId: intoId, submissionId: { in: affectedIds } },
+        select: { submissionId: true },
+      })
+    : [];
+  if (alsoHaveTarget.length > 0) {
+    await tx.submissionAuthor.deleteMany({
+      where: { authorId: fromId, submissionId: { in: alsoHaveTarget.map((l) => l.submissionId) } },
+    });
+  }
+  await tx.submissionAuthor.updateMany({ where: { authorId: fromId }, data: { authorId: intoId } });
+
+  // Raw UPDATE inside refreshAuthorCache on purpose: bookkeeping, so it must
+  // not stamp "now" into Submission.updatedAt.
+  await refreshAuthorCache(tx, { submissionIds: affectedIds });
+  return { affectedIds, alreadyCreditedTarget: alsoHaveTarget.length };
+}
+
+// Deletes an Author row (the database cascades its links away) and rebuilds
+// the `author` string of every hack that still has OTHER linked authors, so
+// the string never names someone the hack is no longer linked to. A hack that
+// credited ONLY this author is skipped by refreshAuthorCache and keeps its
+// text (the legacy "plain text, no link" state) — see the DELETE route for
+// why. The affected hacks are looked up INSIDE the transaction, right before
+// the delete, so a link added a moment earlier can't be missed. Returns how
+// many hacks were unlinked.
+export async function deleteAuthorAndRefreshCache(tx: TxClient, authorId: string): Promise<number> {
+  const links: Array<{ submissionId: string }> = await tx.submissionAuthor.findMany({
+    where: { authorId },
+    select: { submissionId: true },
+  });
+  await tx.author.delete({ where: { id: authorId } });
+  await refreshAuthorCache(tx, { submissionIds: links.map((l) => l.submissionId) });
+  return links.length;
+}
+
+// ─── Reading authors back ───────────────────────────────────────────────────
+
+// The Prisma `select` fragment every reader uses to load a submission's
+// authors in credit order. Spread it into a select/include:
+//   select: { ..., authors: AUTHORS_SELECT }
+export const AUTHORS_SELECT = {
+  orderBy: { position: 'asc' as const },
+  select: { author: { select: { id: true, name: true, status: true } } },
+};
+
+export type SubmissionAuthorRow = { author: { id: string; name: string; status: string } };
+
+// Flattens the relation rows AUTHORS_SELECT returns into plain summaries.
+export function flattenAuthors(rows: SubmissionAuthorRow[] | null | undefined): AuthorSummary[] {
+  return (rows ?? []).map((r) => ({ id: r.author.id, name: r.author.name, status: r.author.status as AuthorStatusValue }));
+}
+
+// ─── Change-request proposals ───────────────────────────────────────────────
+
+export interface ProposedAuthor {
+  id: string;
+  name: string | null;
+}
+
+// Reads ChangeRequest.proposedAuthor (a Json column) in either shape it has
+// ever been stored in — see the column's comment in prisma/schema.prisma:
+//   current: { authors: [{ id, name }, ...] }   (the complete ordered list)
+//   legacy:  { id: string | null, name }         (one author, or null = remove)
+// Returns null when there is no author proposal at all (column NULL, or a
+// value that is neither shape), [] for "remove every linked author", else the
+// ordered list. Defensive about junk because it reads stored JSON.
+export function normalizeProposedAuthors(raw: unknown): ProposedAuthor[] | null {
+  if (raw === null || raw === undefined || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+  if (Array.isArray(obj.authors)) {
+    const out: ProposedAuthor[] = [];
+    for (const a of obj.authors) {
+      if (a && typeof a === 'object' && typeof (a as any).id === 'string' && (a as any).id !== '') {
+        const name = (a as any).name;
+        out.push({ id: (a as any).id, name: typeof name === 'string' ? name : null });
+      }
+    }
+    return out;
+  }
+  if ('id' in obj) {
+    if (typeof obj.id === 'string' && obj.id !== '') {
+      return [{ id: obj.id, name: typeof obj.name === 'string' ? obj.name : null }];
+    }
+    return obj.id === null ? [] : null;
+  }
+  return null;
+}
+
+// ─── Filtering by author ────────────────────────────────────────────────────
+
+// The Prisma `where` fragment behind every "show me this author's hacks"
+// link (/entries?author=…, /submissions?author=…). An EXACT, case-insensitive
+// match on ONE author's name, true when ANY of the hack's linked authors has
+// that name — an exact match on the denormalized `author` string alone would
+// miss every co-credited hack (its string is "A, B", which never equals "A").
+// The second clause keeps matching on the string itself, which is how a hack
+// with plain-text-only author (no linked rows) is found, exactly as before.
+// Spread it into a Submission-level where; it only adds an `OR` key, so it
+// can't clash with a caller that has no OR of its own at that level.
+export function submissionAuthorFilter(name: string): Prisma.SubmissionWhereInput {
+  return {
+    OR: [
+      { authors: { some: { author: { name: { equals: name, mode: 'insensitive' } } } } },
+      { author: { equals: name, mode: 'insensitive' } },
+    ],
+  };
 }

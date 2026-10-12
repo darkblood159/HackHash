@@ -29,6 +29,7 @@ export const FIELD_LABELS: Record<string, string> = {
   baseRomId: 'Base ROM',
   franchiseId: 'Franchise',
   authorId: 'Author',
+  authorIds: 'Author(s)',
   filename: 'ROM filename',
   fileSize: 'File size',
   crc32: 'CRC32',

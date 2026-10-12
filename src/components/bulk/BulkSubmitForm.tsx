@@ -38,7 +38,7 @@ import { Button } from '../ui/Button';
 import { BaseRomPicker, type SelectedBaseRom } from '../BaseRomPicker';
 import { HackNameAutocomplete, type HackFamilySuggestion } from '../HackNameAutocomplete';
 import { FranchisePicker, type SelectedFranchise } from '../FranchisePicker';
-import { AuthorPicker, type SelectedAuthor } from '../AuthorPicker';
+import { AuthorsPicker, type SelectedAuthor } from '../AuthorsPicker';
 import { MappingsSection, type MappingValues } from '../MappingsSection';
 import { TagsEditor } from '../TagsEditor';
 import { LanguagePicker } from '../LanguagePicker';
@@ -101,7 +101,7 @@ export function BulkSubmitForm() {
   const [translationLanguages, setTranslationLanguages] = useState<string[]>([]);
   const [mappings, setMappings] = useState<MappingValues>({});
   const [baseRom, setBaseRom] = useState<SelectedBaseRom | null>(null);
-  const [author, setAuthor] = useState<SelectedAuthor | null>(null);
+  const [authors, setAuthors] = useState<SelectedAuthor[]>([]);
   const [legacyAuthor, setLegacyAuthor] = useState<string | null>(null);
   const [franchise, setFranchise] = useState<SelectedFranchise | null>(null);
   const [prefillNote, setPrefillNote] = useState<string | null>(null);
@@ -161,7 +161,7 @@ export function BulkSubmitForm() {
   // Current values of the shared details, for the async name-match code below
   // (it resolves after a network round trip, so it must read what the header
   // holds NOW, not what it held when the request started — the same reason
-  // the single form keeps franchiseRef/authorRef). Refreshed on every render;
+  // the single form keeps franchiseRef/authorsRef). Refreshed on every render;
   // the apply* helpers also write them straight away.
   const hackNameRef = useRef(hackName);
   hackNameRef.current = hackName;
@@ -175,8 +175,8 @@ export function BulkSubmitForm() {
   mappingsRef.current = mappings;
   const franchiseRef = useRef(franchise);
   franchiseRef.current = franchise;
-  const authorRef = useRef(author);
-  authorRef.current = author;
+  const authorsRef = useRef(authors);
+  authorsRef.current = authors;
   // Bumped by every name check AND every keystroke in the name field, so a
   // slow answer for a name the person has since changed is thrown away rather
   // than filling the form from the wrong hack.
@@ -238,7 +238,7 @@ export function BulkSubmitForm() {
         if (d.gameDatabaseLinks && typeof d.gameDatabaseLinks === 'object') setMappings(d.gameDatabaseLinks);
         if (d.baseRom) setBaseRom(d.baseRom);
         if (d.franchise) setFranchise(d.franchise);
-        if (d.author) setAuthor(d.author);
+        if (Array.isArray(d.authors) && d.authors.length > 0) setAuthors(d.authors);
         else if (typeof d.authorName === 'string' && d.authorName) setLegacyAuthor(d.authorName);
         setPrefillNote(d.hackName ?? null);
       } catch {
@@ -264,11 +264,11 @@ export function BulkSubmitForm() {
       translationLanguages,
       mappings,
       baseRomId: baseRom?.id ?? null,
-      authorId: author?.id ?? null,
+      authorIds: authors.map((a) => a.id),
       legacyAuthor,
       franchiseId: franchise?.id ?? null,
     }),
-    [hackName, platform, description, sourceUrl, releasePageUrl, githubUrl, tags, translationLanguages, mappings, baseRom, author, legacyAuthor, franchise]
+    [hackName, platform, description, sourceUrl, releasePageUrl, githubUrl, tags, translationLanguages, mappings, baseRom, authors, legacyAuthor, franchise]
   );
 
   const ordered = useMemo(() => sortRows(rows, sortMode), [rows, sortMode]);
@@ -367,16 +367,17 @@ export function BulkSubmitForm() {
 
   // Single funnels for franchise / author, so the state, the ref and the
   // "auto-filled" marker can never disagree (same idea as the single form's
-  // applyFranchise/applyAuthor). `auto` = filled in by the site, not picked.
+  // applyFranchise/applyAuthors). `auto` = filled in by the site, not picked.
   const applyFranchise = (next: SelectedFranchise | null, auto = false) => {
     franchiseRef.current = next;
     setFranchise(next);
     if (auto) mark(['franchise']);
     else unmark('franchise');
   };
-  const applyAuthor = (next: SelectedAuthor | null, auto = false) => {
-    authorRef.current = next;
-    setAuthor(next);
+  // Takes the COMPLETE ordered author list ([] clears it).
+  const applyAuthors = (next: SelectedAuthor[], auto = false) => {
+    authorsRef.current = next;
+    setAuthors(next);
     // A real pick (or an explicit removal) always supersedes a carried-over
     // plain-text name — the two are never both live.
     setLegacyAuthor(null);
@@ -431,7 +432,7 @@ export function BulkSubmitForm() {
           tags: tagsRef.current,
           mappings: mappingsRef.current,
           hasFranchise: !!franchiseRef.current,
-          hasAuthor: !!authorRef.current,
+          hasAuthor: authorsRef.current.length > 0,
         },
         data
       );
@@ -453,7 +454,7 @@ export function BulkSubmitForm() {
         setMappings(plan.mappings);
       }
       if (plan.franchise) applyFranchise(plan.franchise, true);
-      if (plan.author) applyAuthor(plan.author, true);
+      if (plan.authors) applyAuthors(plan.authors, true);
       else if (plan.legacyAuthor) applyLegacyAuthor(plan.legacyAuthor, true);
       mark(plan.filled);
     } catch {
@@ -1116,9 +1117,9 @@ export function BulkSubmitForm() {
         {precheck?.baseRomWarning && <p className="text-xs text-status-pending">{precheck.baseRomWarning}</p>}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Field label="Author" autoFilled={autoFilled.has('author')}>
-            <AuthorPicker value={author} onChange={(next) => applyAuthor(next)} initialQuery={legacyAuthor ?? undefined} />
-            {!author && legacyAuthor && (
+          <Field label="Author(s)" autoFilled={autoFilled.has('author')}>
+            <AuthorsPicker value={authors} onChange={(next) => applyAuthors(next)} initialQuery={legacyAuthor ?? undefined} />
+            {authors.length === 0 && legacyAuthor && (
               <p className="mt-1.5 text-xs text-text-secondary">
                 Carried over from an earlier version: &ldquo;{legacyAuthor}&rdquo; (not on the author list yet). Search above to link it, or{' '}
                 <button type="button" onClick={() => applyLegacyAuthor(null)} className="text-phosphor hover:underline">

@@ -13,7 +13,8 @@ import { MAPPING_FIELD_KEYS } from '@/lib/mappingFields';
 import { FamilyPicker, type SelectedFamily } from './FamilyPicker';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
 import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
-import { AuthorPicker, type SelectedAuthor } from './AuthorPicker';
+import { AuthorsPicker, sameAuthorList, type SelectedAuthor } from './AuthorsPicker';
+import { authorsCacheString } from '@/lib/authorList';
 import { TagsEditor } from './TagsEditor';
 import { LanguagePicker } from './LanguagePicker';
 import { TRANSLATION_TRIGGER_SLUGS } from '@/lib/tags';
@@ -34,7 +35,9 @@ interface ChangeRequest {
   proposedFamily?: { id: string | null; name: string | null } | null;
   proposedBaseRom?: { id: string; name: string } | null;
   proposedFranchise?: { id: string | null; name: string | null } | null;
-  proposedAuthor?: { id: string | null; name: string | null } | null;
+  // Current shape { authors: [{ id, name }] } (the complete proposed list; [] = remove all). Requests filed before
+  // multi-author support still have the old { id, name } shape here — read through proposedAuthorList() below.
+  proposedAuthor?: { authors: Array<{ id: string; name: string | null }> } | { id: string | null; name: string | null } | null;
   createdAt: string | Date;
   requestedBy: { id: string; name: string | null; image: string | null };
   reviewedBy?: { id: string; name: string | null } | null;
@@ -67,7 +70,8 @@ interface ChangeRequestSectionProps {
   currentBaseRom?: SelectedBaseRom | null;
   currentFranchise?: SelectedFranchise | null;
   // The linked Author row, or null — including for a submission whose author is only legacy plain text (current.author still holds it).
-  currentAuthor?: SelectedAuthor | null;
+  // The Author rows this submission is linked to, in credit order ([] when it only has plain-text author).
+  currentAuthors?: SelectedAuthor[];
   currentTags?: string[]; // current tag slugs
   currentTranslationLanguages?: string[];
   initialRequests: ChangeRequest[];
@@ -83,7 +87,18 @@ interface ChangeRequestSectionProps {
 
 const inputClass = "w-full px-3 py-2 rounded-md bg-bg-base border border-border text-text-primary text-sm placeholder:text-text-muted focus:border-phosphor/50";
 
-export function ChangeRequestSection({ submissionId, status, current, currentMapping, currentFamily = null, currentBaseRom = null, currentFranchise = null, currentAuthor = null, currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions, fileInfo, verificationScore }: ChangeRequestSectionProps) {
+// Reads a stored proposedAuthor in either shape it has ever had: the current
+// { authors: [{ id, name }] }, or the pre-multi-author { id, name } (id null =
+// "remove"). Returns null when no author change was proposed, [] for "remove
+// every linked author". Display-side twin of normalizeProposedAuthors() in
+// src/lib/author.ts, which a client component can't import (it reaches Prisma).
+function proposedAuthorList(raw: ChangeRequest['proposedAuthor']): Array<{ id: string; name: string | null }> | null {
+  if (raw === undefined || raw === null) return null;
+  if ('authors' in raw) return raw.authors;
+  return raw.id ? [{ id: raw.id, name: raw.name }] : [];
+}
+
+export function ChangeRequestSection({ submissionId, status, current, currentMapping, currentFamily = null, currentBaseRom = null, currentFranchise = null, currentAuthors = [], currentTags = [], currentTranslationLanguages = [], initialRequests, isAdmin, canRequest, hasOtherVersions, fileInfo, verificationScore }: ChangeRequestSectionProps) {
   const router = useRouter();
   const [requests, setRequests] = useState(initialRequests);
   const [open, setOpen] = useState(false);
@@ -110,11 +125,11 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
   const [selectedFamily, setSelectedFamily] = useState<SelectedFamily | null>(currentFamily);
   const [selectedBaseRom, setSelectedBaseRom] = useState<SelectedBaseRom | null>(currentBaseRom);
   const [selectedFranchise, setSelectedFranchise] = useState<SelectedFranchise | null>(currentFranchise);
-  const [selectedAuthor, setSelectedAuthor] = useState<SelectedAuthor | null>(currentAuthor);
-  // Plain diff, same reasoning as franchiseChanged in submitRequest below. A
-  // legacy plain-text-only author starts with both sides null, so just
-  // opening the form never proposes clearing it.
-  const authorChanged = (selectedAuthor?.id ?? null) !== (currentAuthor?.id ?? null);
+  const [selectedAuthors, setSelectedAuthors] = useState<SelectedAuthor[]>(currentAuthors);
+  // Plain diff of the ordered list, same reasoning as franchiseChanged in
+  // submitRequest below. A legacy plain-text-only author starts with both
+  // sides empty, so just opening the form never proposes clearing it.
+  const authorChanged = !sameAuthorList(selectedAuthors, currentAuthors);
   const [tagsForm, setTagsForm] = useState<string[]>(currentTags);
   const [translationLanguagesForm, setTranslationLanguagesForm] = useState<string[]>(currentTranslationLanguages);
   const [applyToAllVersions, setApplyToAllVersions] = useState(true);
@@ -197,7 +212,8 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
           ...(familyChanged ? { proposedFamily: { id: selectedFamily?.id ?? null, name: selectedFamily?.name ?? null } } : {}),
           ...(baseRomChanged ? { proposedBaseRom: { id: selectedBaseRom!.id, name: selectedBaseRom!.name } } : {}),
           ...(franchiseChanged ? { proposedFranchise: { id: selectedFranchise?.id ?? null, name: selectedFranchise?.name ?? null } } : {}),
-          ...(authorChanged ? { proposedAuthor: { id: selectedAuthor?.id ?? null, name: selectedAuthor?.name ?? null } } : {}),
+          // The complete proposed list, in order; an empty list proposes removing every linked author.
+          ...(authorChanged ? { proposedAuthor: { authors: selectedAuthors.map((a) => ({ id: a.id, name: a.name })) } } : {}),
           ...(tagsChanged ? { proposedTags: tagsForm } : {}),
           ...(translationLanguagesChanged ? { proposedTranslationLanguages: translationLanguagesForm } : {}),
         }),
@@ -266,8 +282,8 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
       version: form.version,
       platform: form.platform,
       // Falls back to the untouched original text when the picker wasn't used, so a legacy
-      // plain-text author (no linked Author row) never previews as "cleared".
-      author: authorChanged ? (selectedAuthor?.name ?? null) : current.author,
+      // plain-text author (no linked Author rows) never previews as "cleared".
+      author: authorChanged ? authorsCacheString(selectedAuthors.map((a) => a.name)) : current.author,
       releaseYear,
       releaseDate,
       description: form.description || null,
@@ -312,16 +328,16 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
               <input className={inputClass} value={form.version} onChange={(e) => update('version', e.target.value)} />
             </div>
             <div>
-              <label className="block text-xs text-text-muted mb-1">Author</label>
-              {!currentAuthor && current.author && !selectedAuthor && (
+              <label className="block text-xs text-text-muted mb-1">Author(s)</label>
+              {currentAuthors.length === 0 && current.author && selectedAuthors.length === 0 && (
                 <p className="text-[11px] text-text-muted mb-1">
                   On file as plain text: &ldquo;{current.author}&rdquo; (not linked to the author list). Left as-is unless you pick one below.
                 </p>
               )}
-              <AuthorPicker
-                value={selectedAuthor}
-                onChange={setSelectedAuthor}
-                initialQuery={!currentAuthor && current.author ? current.author : undefined}
+              <AuthorsPicker
+                value={selectedAuthors}
+                onChange={setSelectedAuthors}
+                initialQuery={currentAuthors.length === 0 && current.author ? current.author : undefined}
               />
             </div>
             <div>
@@ -540,10 +556,12 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
                     {r.proposedFranchise.id ? r.proposedFranchise.name : <em className="text-text-muted">remove franchise</em>}
                   </p>
                 )}
-                {r.proposedAuthor !== undefined && r.proposedAuthor !== null && (
+                {proposedAuthorList(r.proposedAuthor) !== null && (
                   <p className="text-xs text-text-secondary">
                     <span className="text-text-muted">Author:</span>{' '}
-                    {r.proposedAuthor.id ? r.proposedAuthor.name : <em className="text-text-muted">remove author</em>}
+                    {proposedAuthorList(r.proposedAuthor)!.length > 0
+                      ? proposedAuthorList(r.proposedAuthor)!.map((a) => a.name ?? '(unnamed)').join(', ')
+                      : <em className="text-text-muted">remove author</em>}
                   </p>
                 )}
               </div>
@@ -565,11 +583,11 @@ export function ChangeRequestSection({ submissionId, status, current, currentMap
                   {hasOtherVersions && r.applyToAllVersions !== false ? ', on every version of this hack.' : '.'}
                 </p>
               )}
-              {r.proposedAuthor !== undefined && r.proposedAuthor !== null && r.status === 'PENDING' && (
+              {proposedAuthorList(r.proposedAuthor) !== null && r.status === 'PENDING' && (
                 <p className="text-xs text-phosphor mt-1">
-                  {r.proposedAuthor.id
-                    ? `Approving this will also set its author to ${r.proposedAuthor.name}`
-                    : 'Approving this will also remove its linked author'}
+                  {proposedAuthorList(r.proposedAuthor)!.length > 0
+                    ? `Approving this will also set its ${proposedAuthorList(r.proposedAuthor)!.length > 1 ? 'authors' : 'author'} to ${proposedAuthorList(r.proposedAuthor)!.map((a) => a.name ?? '(unnamed)').join(', ')}`
+                    : 'Approving this will also remove its linked authors'}
                   {hasOtherVersions && r.applyToAllVersions !== false ? ', on every version of this hack.' : '.'}
                 </p>
               )}

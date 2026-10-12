@@ -41,10 +41,15 @@ interface AuthorPickerProps {
   allowCreate?: boolean;
   // Hides one author from results (the merge tool excludes the one being merged away).
   excludeId?: string;
+  // Hides authors from results client-side — what AuthorsPicker passes so an
+  // author already on the hack can't be picked a second time. Filtered at
+  // render time on purpose (not sent to the API and not an effect dependency:
+  // an array prop would change identity every render and re-fire the search).
+  excludeIds?: string[];
   placeholder?: string;
   // Pre-fills the search box on first render, while value is still null.
   // Used for a submission that already has a free-text `author` string but
-  // no authorId yet (every submission from before this system existed) —
+  // no linked Author rows yet (every submission from before this system existed) —
   // seeds the search with that existing text so whoever's editing can see
   // right away whether a matching Author row already exists, rather than
   // the picker opening on an empty box that looks like nothing is on
@@ -53,12 +58,15 @@ interface AuthorPickerProps {
   initialQuery?: string;
 }
 
-export function AuthorPicker({ value, onChange, allowCreate = true, excludeId, placeholder, initialQuery }: AuthorPickerProps) {
+export function AuthorPicker({ value, onChange, allowCreate = true, excludeId, excludeIds, placeholder, initialQuery }: AuthorPickerProps) {
   const [changing, setChanging] = useState(false);
   const [query, setQuery] = useState(initialQuery ?? '');
   const [open, setOpen] = useState(false);
   const [hits, setHits] = useState<AuthorHit[]>([]);
   const [hasExactMatch, setHasExactMatch] = useState(false);
+  // The author the typed text matches exactly, if any — lets the dropdown say
+  // "already added" when that one is in excludeIds (and so filtered out of hits).
+  const [exactMatchId, setExactMatchId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +110,7 @@ export function AuthorPicker({ value, onChange, allowCreate = true, excludeId, p
         if (cancelled) return;
         setHits(Array.isArray(data.authors) ? data.authors : []);
         setHasExactMatch(!!data.exactMatch);
+        setExactMatchId(data.exactMatch?.id ?? null);
       } catch {
         // Aborted (a newer search superseded this one) or a network blip —
         // either way there's nothing useful to show from this response.
@@ -199,7 +208,10 @@ export function AuthorPicker({ value, onChange, allowCreate = true, excludeId, p
 
   // ── Search state ──
   const showCreateRow = allowCreate && !!trimmed && !hasExactMatch && !loading;
-  const nearMatchCount = hits.length;
+  const excluded = new Set(excludeIds ?? []);
+  const visibleHits = excluded.size ? hits.filter((h) => !excluded.has(h.id)) : hits;
+  const exactIsAlreadyAdded = !!exactMatchId && excluded.has(exactMatchId);
+  const nearMatchCount = visibleHits.length;
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -222,7 +234,7 @@ export function AuthorPicker({ value, onChange, allowCreate = true, excludeId, p
 
       {open && (
         <div className="absolute z-10 mt-1 w-full max-h-64 overflow-y-auto rounded-md border border-border bg-bg-surface shadow-lg">
-          {hits.map((h) => (
+          {visibleHits.map((h) => (
             <button
               key={h.id}
               type="button"
@@ -239,9 +251,11 @@ export function AuthorPicker({ value, onChange, allowCreate = true, excludeId, p
             </button>
           ))}
 
-          {!loading && hits.length === 0 && (
+          {!loading && visibleHits.length === 0 && (
             <p className="px-3 py-2 text-xs text-text-muted">
-              {trimmed ? 'No authors match that.' : 'No authors yet.'}
+              {exactIsAlreadyAdded
+                ? 'That author is already added.'
+                : trimmed ? 'No authors match that.' : hits.length > 0 ? 'Everyone listed is already added.' : 'No authors yet.'}
             </p>
           )}
 

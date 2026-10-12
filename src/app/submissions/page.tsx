@@ -14,6 +14,8 @@ import { TagFilters } from '@/components/TagFilters';
 import { PatchFilters } from '@/components/PatchFilters';
 import { FranchiseFilter } from '@/components/FranchiseFilter';
 import { getFranchiseFilterOptions } from '@/lib/franchise';
+import { AUTHORS_SELECT, flattenAuthors, submissionAuthorFilter } from '@/lib/author';
+import { AuthorLinks } from '@/components/AuthorLinks';
 import { PLATFORMS } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -68,7 +70,7 @@ export default async function SubmissionsPage({
       ...(tag ? { tags: { some: { tag: { slug: tag } } } } : {}),
       ...(baseRomFilter ? { baseRomId: baseRomFilter.id } : {}),
       ...(franchiseFilter ? { franchiseId: franchiseFilter.id } : {}),
-      ...(author ? { author: { equals: author, mode: 'insensitive' as const } } : {}),
+      ...(author ? submissionAuthorFilter(author) : {}),
       ...(hasPatch === 'yes' ? { patchUploadedAt: { not: null } } : {}),
       ...(hasPatch === 'no' ? { patchUploadedAt: null } : {}),
     },
@@ -76,6 +78,7 @@ export default async function SubmissionsPage({
       submittedBy: { select: { id: true, name: true, image: true, username: true } },
       tags: { include: { tag: true } },
       franchise: { select: { id: true, name: true } },
+      authors: AUTHORS_SELECT,
       _count: { select: { verifications: true, comments: true } },
     },
     orderBy: [{ verificationScore: 'desc' }, { createdAt: 'desc' }],
@@ -189,9 +192,12 @@ export default async function SubmissionsPage({
                 {sub.author && (
                   <>
                     by{' '}
-                    <Link href={`/submissions?author=${encodeURIComponent(sub.author)}`} className="relative hover:text-phosphor hover:underline">
-                      {sub.author}
-                    </Link>{' '}
+                    <AuthorLinks
+                      authors={flattenAuthors(sub.authors)}
+                      fallback={sub.author}
+                      basePath="/submissions"
+                      linkClassName="relative hover:text-phosphor hover:underline"
+                    />{' '}
                     ·{' '}
                   </>
                 )}submitted {formatDistanceToNow(new Date(sub.createdAt), { addSuffix: true })} ·{' '}

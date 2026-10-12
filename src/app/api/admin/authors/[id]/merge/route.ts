@@ -4,6 +4,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
+import { mergeAuthorLinks } from '@/lib/author';
 
 const mergeSchema = z.object({ intoId: z.string().min(1, 'Pick an author to merge into') });
 
@@ -13,13 +14,18 @@ const mergeSchema = z.object({ intoId: z.string().min(1, 'Pick an author to merg
 // ("RomHacker99" and "RomHacker_99" both got created): moves EVERY
 // submission off this author (the "from", identified by the URL) onto
 // `intoId`, then deletes the now-empty from-row. Mirrors what the franchise
-// merge route does, with one addition that route doesn't need: every moved
-// submission's denormalized `author` string is updated to the target's
-// name too, not just authorId — otherwise the merge would silently leave
-// every affected hack still showing the OLD (now-deleted) author's name in
-// search/export/display. The target keeps its own name — if you want the
-// merged result called something else, rename the target afterward (which
-// itself pushes the new name out the same way — see that route).
+// merge route does, with two additions that route doesn't need:
+//  - every affected submission's denormalized `author` string is rebuilt
+//    from its links, not just the link moved — otherwise the merge would
+//    silently leave every affected hack still showing the OLD (now-deleted)
+//    author's name in search/export/display. The target keeps its own name —
+//    if you want the merged result called something else, rename the target
+//    afterward (which itself pushes the new name out the same way — see that
+//    route).
+//  - a hack can credit SEVERAL authors, so it can already credit BOTH of
+//    these. There the duplicate "from" link is simply dropped (the target
+//    keeps its own place in that hack's order); everywhere else the link
+//    moves to the target in the same position.
 //
 // If the from-author was APPROVED and the target wasn't, the target is
 // promoted to APPROVED: an admin deliberately choosing to fold a live
@@ -51,27 +57,31 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   const promoteTarget = from.status === 'APPROVED' && into.status !== 'APPROVED';
 
   const moved = await prisma.$transaction(async (tx) => {
-    const result = await tx.submission.updateMany({
-      where: { authorId: from.id },
-      data: { authorId: into.id, author: into.name },
-    });
+    // Re-points (or, where the hack already credits the target, drops) every link
+    // to "from" and rebuilds the affected hacks' author strings — see mergeAuthorLinks.
+    const { affectedIds, alreadyCreditedTarget } = await mergeAuthorLinks(tx, from.id, into.id);
+
     if (promoteTarget) {
       await tx.author.update({
         where: { id: into.id },
         data: { status: 'APPROVED', approvedById: session.user.id, approvedAt: new Date() },
       });
     }
-    // Nothing references `from` anymore — the updateMany above already
-    // moved every submission that did — so this can never hit the FK.
+    // Nothing references `from` anymore — every link was moved or dropped
+    // above — so this can never hit the FK (and the cascade has nothing left
+    // to remove).
     await tx.author.delete({ where: { id: from.id } });
     await tx.auditLog.create({
       data: {
         action: 'AUTHOR_MERGED',
-        details: { fromId: from.id, fromName: from.name, intoId: into.id, intoName: into.name, movedSubmissions: result.count, promotedTarget: promoteTarget },
+        details: {
+          fromId: from.id, fromName: from.name, intoId: into.id, intoName: into.name,
+          movedSubmissions: affectedIds.length, alreadyCreditedTarget, promotedTarget: promoteTarget,
+        },
         userId: session.user.id,
       },
     });
-    return result.count;
+    return affectedIds.length;
   });
 
   return NextResponse.json({ ok: true, moved, promotedTarget: promoteTarget });

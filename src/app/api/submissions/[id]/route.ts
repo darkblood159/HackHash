@@ -12,7 +12,7 @@ import { LANGUAGE_CODES } from '@/lib/languages';
 import { propagateSharedFields, propagateTags, resolveReleaseFields } from '@/lib/hackFamily';
 import { validateBaseRomAssignment, BaseRomAssignError } from '@/lib/baseRom';
 import { validateFranchiseAssignment, propagateFranchise, FranchiseAssignError } from '@/lib/franchise';
-import { validateAuthorAssignment, propagateAuthor, AuthorAssignError, type AuthorSummary } from '@/lib/author';
+import { validateAuthorAssignments, propagateAuthors, setSubmissionAuthors, authorsCacheString, AuthorAssignError, type AuthorSummary } from '@/lib/author';
 import { resolveMachineName, triggerHasheousPushForSubmission } from '@/lib/approval';
 
 // ─── GET /api/submissions/:id ─────────────────────────────────────────────────
@@ -144,7 +144,10 @@ export async function PATCH(
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const submission = await prisma.submission.findUnique({ where: { id: params.id } });
+  const submission = await prisma.submission.findUnique({
+    where: { id: params.id },
+    include: { authors: { select: { authorId: true }, orderBy: { position: 'asc' } } },
+  });
   if (!submission) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
@@ -163,7 +166,7 @@ export async function PATCH(
 
   const body = await req.json();
   const allowedFields = ['hackName', 'version', 'description', 'versionChangelog', 'author', 'releaseYear', 'releaseDate', 'platform',
-    'sourceUrl', 'notes', 'releasePageUrl', 'githubUrl', 'patchType', 'patchFilename', 'patchSha1', 'baseRomId', 'franchiseId', 'authorId'];
+    'sourceUrl', 'notes', 'releasePageUrl', 'githubUrl', 'patchType', 'patchFilename', 'patchSha1', 'baseRomId', 'franchiseId'];
 
   const updateData: Record<string, unknown> = {};
   for (const field of allowedFields) {
@@ -227,56 +230,68 @@ export async function PATCH(
     return NextResponse.json({ error: 'Validation failed', details: fieldCheck.error.flatten() }, { status: 422 });
   }
 
-  // authorId: OPTIONAL, same courtesy-validate-before-writing treatment as
+  // authorIds: OPTIONAL, same courtesy-validate-before-writing treatment as
   // franchiseId below (checked here rather than down there, specifically so
-  // the resolved name below is in place BEFORE sharedChanges is built a few
-  // lines down — see that block's own use of updateData.author). null is a
-  // legitimate value — "remove the linked author" — and only a non-null id
-  // needs checking against the live table.
+  // the resolved names below are in place BEFORE sharedChanges is built a few
+  // lines down — see that block's own use of updateData.author). The array is
+  // the COMPLETE ordered list the hack should end up with: [] means "remove
+  // every linked author", and only non-empty ids need checking against the
+  // live table. The old single `authorId` (string | null) is still accepted
+  // for a page that was open across the deploy; it means [id] / [].
   //
-  // Unlike franchiseId, a resolved authorId also overwrites updateData.author
-  // itself: `author` is a denormalized CACHE of whichever Author row this is
-  // linked to (see that field's schema comment), so it has to reflect the
-  // Author's actual current name, never a client-sent string that might not
-  // agree — even if this same request also happened to include a plain
-  // `author` value (allowedFields still accepts one, for anything hitting
-  // this API without going through AuthorPicker; authorId simply wins when
-  // both are present).
-  let authorTarget: AuthorSummary | null = null;
-  let authorChangeDetail: { from: string | null; to: string | null; toName: string | null } | null = null;
-  if ('authorId' in updateData) {
-    const nextAuthorId = updateData.authorId;
-    if (nextAuthorId !== null && (typeof nextAuthorId !== 'string' || nextAuthorId === '')) {
+  // Neither is a Submission column any more (they live in SubmissionAuthor
+  // rows), so they are NOT in allowedFields and never reach updateData —
+  // the links are written inside the transaction below. What does go into
+  // updateData is `author`: the denormalized CACHE of the linked authors'
+  // names (see that field's schema comment), so it has to reflect the
+  // Authors' actual current names, never a client-sent string that might not
+  // agree — even if this same request also included a plain `author` value
+  // (allowedFields still accepts one, for anything hitting this API without
+  // going through the picker; the linked authors simply win when both are
+  // present).
+  let authorTargets: AuthorSummary[] | null = null; // null = this request doesn't touch the authors
+  let authorChangeDetail: { from: string[]; to: string[]; toNames: string[] } | null = null;
+  const authorsInBody = 'authorIds' in body || 'authorId' in body;
+  if (authorsInBody) {
+    let requestedIds: unknown[];
+    if ('authorIds' in body) {
+      if (!Array.isArray(body.authorIds)) {
+        return NextResponse.json({ error: 'Invalid authors' }, { status: 400 });
+      }
+      requestedIds = body.authorIds;
+    } else {
+      requestedIds = body.authorId === null ? [] : [body.authorId];
+    }
+    if (requestedIds.some((id) => typeof id !== 'string' || id === '')) {
       return NextResponse.json({ error: 'Invalid author' }, { status: 400 });
     }
-    if (nextAuthorId) {
-      try {
-        authorTarget = await validateAuthorAssignment(prisma, nextAuthorId as string);
-      } catch (err) {
-        if (err instanceof AuthorAssignError) {
-          return NextResponse.json({ error: err.message }, { status: err.status });
-        }
-        throw err;
+    try {
+      authorTargets = await validateAuthorAssignments(prisma, requestedIds as string[]);
+    } catch (err) {
+      if (err instanceof AuthorAssignError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
       }
+      throw err;
     }
-    authorChangeDetail = { from: submission.authorId ?? null, to: (nextAuthorId as string | null), toName: authorTarget?.name ?? null };
-    updateData.author = authorTarget?.name ?? null;
+    authorChangeDetail = {
+      from: submission.authors.map((a) => a.authorId),
+      to: authorTargets.map((t) => t.id),
+      toNames: authorTargets.map((t) => t.name),
+    };
+    updateData.author = authorsCacheString(authorTargets.map((t) => t.name));
   }
 
-  // The reverse case: a plain-text `author` edit with NO authorId alongside
-  // it, on a submission that IS linked to an Author row. AuthorPicker never
-  // sends this (it always sends authorId), but this API still accepts a
+  // The reverse case: a plain-text `author` edit with NO authors alongside
+  // it, on a submission that IS linked to Author rows. The pickers never
+  // send this (they always send authorIds), but this API still accepts a
   // plain `author` for direct callers and any older page still open from
   // before the picker shipped. Left alone, the text would silently stop
-  // matching the linked row — and a later rename or merge of that Author
-  // would then overwrite the text someone deliberately typed. A different
-  // name means the link no longer holds, so unlink it (author text is
-  // untouched; it's exactly the legacy "plain text, no link" state). Must
-  // run AFTER the authorId block above, which would otherwise see the
-  // authorId set here and overwrite the typed text with null.
+  // matching the linked rows — and a later rename or merge of one of those
+  // Authors would then overwrite the text someone deliberately typed. A
+  // different text means the links no longer hold, so remove them (author
+  // text is untouched; it's exactly the legacy "plain text, no link" state).
   let unlinkAuthorOnTextEdit = false;
-  if ('author' in updateData && !('authorId' in updateData) && submission.authorId && updateData.author !== submission.author) {
-    updateData.authorId = null;
+  if ('author' in updateData && !authorsInBody && submission.authors.length > 0 && updateData.author !== submission.author) {
     unlinkAuthorOnTextEdit = true;
   }
 
@@ -353,6 +368,12 @@ export async function PATCH(
         data: updateData,
       });
 
+      if (authorTargets) {
+        await setSubmissionAuthors(tx, params.id, authorTargets);
+      } else if (unlinkAuthorOnTextEdit) {
+        await tx.submissionAuthor.deleteMany({ where: { submissionId: params.id } });
+      }
+
       if (submission.status === 'APPROVED' && renameFieldsChanged) {
         const approvedEntry = await tx.approvedEntry.findUnique({ where: { submissionId: params.id } });
         if (approvedEntry) {
@@ -410,25 +431,24 @@ export async function PATCH(
         if (franchiseChangeDetail) {
           await propagateFranchise(tx, submission.hackFamilyId, params.id, franchiseChangeDetail.to);
         }
-        // authorId is a relation column, which propagateSharedFields above
-        // (plain string columns only) never touches — so without this the
-        // siblings would get the right author NAME but not actually be
-        // linked to the same Author row. propagateAuthor also rewrites
+        // The author links are join-table rows, which propagateSharedFields
+        // above (plain string columns only) never touches — so without this
+        // the siblings would get the right author NAMES but not actually be
+        // linked to the same Author rows. propagateAuthors also rewrites
         // their `author` string to the same value; redundant with the
         // propagateSharedFields call just above (both derive from the same
-        // resolved name), but harmless and keeps propagateAuthor correct on
+        // resolved names), but harmless and keeps propagateAuthors correct on
         // its own for its other callers.
-        if (authorChangeDetail) {
-          await propagateAuthor(tx, submission.hackFamilyId, params.id, authorTarget);
+        if (authorTargets) {
+          await propagateAuthors(tx, submission.hackFamilyId, params.id, authorTargets);
         }
-        // The text edit above just fanned the new plain name out to every
-        // other version (propagateSharedFields), so any link those versions
-        // had to an Author row is now stale for the same reason this one's
-        // was — clear it. Only when the text actually fanned out.
+        // The text edit above just fanned the new plain text out to every
+        // other version (propagateSharedFields), so any links those versions
+        // had to Author rows are now stale for the same reason this one's
+        // were — remove them. Only when the text actually fanned out.
         if (unlinkAuthorOnTextEdit && hasSharedChanges) {
-          await tx.submission.updateMany({
-            where: { hackFamilyId: submission.hackFamilyId, id: { not: params.id } },
-            data: { authorId: null },
+          await tx.submissionAuthor.deleteMany({
+            where: { submission: { hackFamilyId: submission.hackFamilyId, id: { not: params.id } } },
           });
         }
       }

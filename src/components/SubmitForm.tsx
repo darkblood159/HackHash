@@ -9,7 +9,8 @@ import { MappingsSection, type MappingValues } from './MappingsSection';
 import { HackNameAutocomplete, type HackFamilySuggestion } from './HackNameAutocomplete';
 import { BaseRomPicker, type SelectedBaseRom } from './BaseRomPicker';
 import { FranchisePicker, type SelectedFranchise } from './FranchisePicker';
-import { AuthorPicker, type SelectedAuthor } from './AuthorPicker';
+import { AuthorsPicker, type SelectedAuthor } from './AuthorsPicker';
+import { authorsCacheString } from '@/lib/authorList';
 import { Button } from './ui/Button';
 import { AlertTriangle, CheckCircle2, ChevronLeft, Eye, FileWarning, Sparkles } from 'lucide-react';
 import type { ROMFileInfo } from '@/types';
@@ -102,12 +103,12 @@ export function SubmitForm() {
   const [franchise, setFranchise] = useState<SelectedFranchise | null>(null);
   const franchiseRef = useRef<SelectedFranchise | null>(null);
   // Optional, same shape and same stale-closure-safe ref mirror as franchise
-  // above. Author is picked from the shared Author list (AuthorPicker), not
-  // typed as free text.
-  const [author, setAuthor] = useState<SelectedAuthor | null>(null);
-  const authorRef = useRef<SelectedAuthor | null>(null);
+  // above. Authors are picked from the shared Author list (AuthorsPicker), not
+  // typed as free text — one or more, in credit order.
+  const [authors, setAuthors] = useState<SelectedAuthor[]>([]);
+  const authorsRef = useRef<SelectedAuthor[]>([]);
   // A plain author NAME carried over from an earlier version whose author was
-  // never linked to an Author row (every hack submitted before the Author
+  // never linked to Author rows (every hack submitted before the Author
   // list existed). Without this, adding a new version of such a hack would
   // prefill an empty picker, submit with no author at all, and — since a
   // new version's author is pushed out to every other version by default —
@@ -215,10 +216,11 @@ export function SubmitForm() {
     });
   };
 
-  // Same single-funnel idea as applyFranchise, for the author picker.
-  const applyAuthor = (next: SelectedAuthor | null, auto = false) => {
-    authorRef.current = next;
-    setAuthor(next);
+  // Same single-funnel idea as applyFranchise, for the authors picker — takes
+  // the COMPLETE ordered list ([] clears it).
+  const applyAuthors = (next: SelectedAuthor[], auto = false) => {
+    authorsRef.current = next;
+    setAuthors(next);
     // A real pick (or an explicit removal) always supersedes a carried-over
     // plain-text name — the two are never both live.
     setLegacyAuthor(null);
@@ -276,10 +278,10 @@ export function SubmitForm() {
       if (filled.size > 0) setAutoFilledFields((prev) => new Set([...Array.from(prev), ...Array.from(filled)]));
       // Only when nothing's been picked yet — never clobbers a choice.
       if (data.franchise && !franchiseRef.current) applyFranchise(data.franchise, true);
-      // Same never-clobber rule. Prefer a linked Author; fall back to the
+      // Same never-clobber rule. Prefer the linked Authors; fall back to the
       // plain name for a hack whose author was never linked (see legacyAuthor).
-      if (!authorRef.current) {
-        if (data.author) applyAuthor(data.author, true);
+      if (authorsRef.current.length === 0) {
+        if (Array.isArray(data.authors) && data.authors.length > 0) applyAuthors(data.authors, true);
         else if (data.authorName) applyLegacyAuthor(data.authorName, true);
       }
     } catch {
@@ -410,8 +412,8 @@ export function SubmitForm() {
         if (filled.size > 0) setAutoFilledFields((prev) => new Set([...Array.from(prev), ...Array.from(filled)]));
         if (data.baseRom) setBaseRom(data.baseRom);
         if (data.franchise && !franchiseRef.current) applyFranchise(data.franchise, true);
-        if (!authorRef.current) {
-          if (data.author) applyAuthor(data.author, true);
+        if (authorsRef.current.length === 0) {
+          if (Array.isArray(data.authors) && data.authors.length > 0) applyAuthors(data.authors, true);
           else if (data.authorName) applyLegacyAuthor(data.authorName, true);
         }
 
@@ -531,7 +533,7 @@ export function SubmitForm() {
       maybeSet('releaseDate', form.releaseDate);
       maybeSet('releaseYear', form.releaseYear, true);
       maybeSet('description', form.description);
-      if (!author && legacyAuthor) maybeSet('author', legacyAuthor);
+      if (authors.length === 0 && legacyAuthor) maybeSet('author', legacyAuthor);
       maybeSet('sourceUrl', form.sourceUrl);
       maybeSet('platform', form.platform);
       maybeSet('notes', form.notes);
@@ -562,7 +564,7 @@ export function SubmitForm() {
             ...(baseRom ? { proposedBaseRom: { id: baseRom.id, name: baseRom.name } } : {}),
             // Same "only if it actually has a value" rule as baseRom above.
             ...(franchise ? { proposedFranchise: { id: franchise.id, name: franchise.name } } : {}),
-            ...(author ? { proposedAuthor: { id: author.id, name: author.name } } : {}),
+            ...(authors.length > 0 ? { proposedAuthor: { authors: authors.map((a) => ({ id: a.id, name: a.name })) } } : {}),
             applyToAllVersions,
             reason: 'Submitted while trying to upload a file that matched an existing entry\'s hash — proposed information for the existing entry instead of a new submission.',
           }),
@@ -593,9 +595,9 @@ export function SubmitForm() {
         body: JSON.stringify({
           hackName: form.hackName,
           version: form.version,
-          authorId: author?.id,
-          // Only while nothing was picked — see legacyAuthor. The server ignores this whenever authorId is present.
-          author: !author && legacyAuthor ? legacyAuthor : undefined,
+          authorIds: authors.length > 0 ? authors.map((a) => a.id) : undefined,
+          // Only while nothing was picked — see legacyAuthor. The server ignores this whenever authorIds is present.
+          author: authors.length === 0 && legacyAuthor ? legacyAuthor : undefined,
           releaseYear: form.releaseYear ? parseInt(form.releaseYear, 10) : undefined,
           releaseDate: form.releaseDate || undefined,
           platform: form.platform,
@@ -680,9 +682,10 @@ export function SubmitForm() {
       hackName: form.hackName,
       version: form.version,
       platform: form.platform,
-      // A picked Author wins; the carried-over plain-text name only stands in
-      // while nothing's been picked (same rule as the POST body).
-      author: author?.name ?? legacyAuthor ?? null,
+      // Picked Authors win (names joined in credit order, same as the string the
+      // server stores); the carried-over plain-text name only stands in while
+      // nothing's been picked (same rule as the POST body).
+      author: authorsCacheString(authors.map((a) => a.name)) ?? legacyAuthor ?? null,
       releaseYear: form.releaseYear ? parseInt(form.releaseYear, 10) : null,
       releaseDate: form.releaseDate || null,
       description: form.description || null,
@@ -949,9 +952,9 @@ export function SubmitForm() {
                 </label>
               </div>
             </Field>
-            <Field label="Author" hint="Pick from the list, or add a new one. Leave blank if unknown" autoFilled={autoFilledFields.has('author')}>
-              <AuthorPicker value={author} onChange={(next) => applyAuthor(next)} />
-              {!author && legacyAuthor && (
+            <Field label="Author(s)" hint="Pick from the list, or add a new one — add as many as the hack credits. Leave blank if unknown" autoFilled={autoFilledFields.has('author')}>
+              <AuthorsPicker value={authors} onChange={(next) => applyAuthors(next)} />
+              {authors.length === 0 && legacyAuthor && (
                 <p className="mt-1.5 text-xs text-text-secondary">
                   Carried over from an earlier version: &ldquo;{legacyAuthor}&rdquo; (not on the author list yet).
                   Search above to link it, or{' '}

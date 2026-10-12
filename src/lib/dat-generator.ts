@@ -130,15 +130,20 @@ interface DetailedEntry {
     // approved franchise instead of resetting it to pending — see
     // resolveOrCreateFranchise in src/lib/franchise.ts.
     franchise: { name: string; status: string } | null;
-    // The Author row this submission is linked to (see the Author model in
-    // prisma/schema.prisma), or null — including for every submission whose
-    // author was only ever plain text, which still round-trips through
-    // `author` above exactly as before. Named authorRef, not author,
-    // because `author` (the plain string) already occupies that key one
-    // level up. Includes status for the same reason franchise does: a
-    // re-import should preserve an already-approved author instead of
-    // resetting it to pending — see resolveOrCreateAuthor in
-    // src/lib/author.ts.
+    // The Author rows this submission is linked to, in credit order (see the
+    // Author model in prisma/schema.prisma) — empty for every submission
+    // whose author was only ever plain text, which still round-trips through
+    // `author` above exactly as before (that string is the names joined with
+    // ", "). Includes status for the same reason franchise does: a re-import
+    // should preserve an already-approved author instead of resetting it to
+    // pending — see resolveOrCreateAuthor in src/lib/author.ts.
+    authors: Array<{ name: string; status: string }>;
+    // The FIRST linked author, in the shape this field had before a hack
+    // could credit several (named authorRef, not author, because `author` —
+    // the plain string — already occupies that key one level up). Kept so an
+    // export from this build still imports into one from before multi-author
+    // support (which reads only this); this build's importer prefers
+    // `authors` and falls back to this. Redundant with authors[0].
     authorRef: { name: string; status: string } | null;
 
     // Other compressed/container copies of this exact file that a trusted
@@ -282,7 +287,7 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
           hackFamily: true,
           baseRom: true,
           franchise: true,
-          authorRef: true,
+          authors: { include: { author: true }, orderBy: { position: 'asc' } },
           alternateFormats: { where: { status: 'APPROVED' }, orderBy: { createdAt: 'asc' } },
         },
       },
@@ -360,8 +365,9 @@ export async function getDetailedApprovedEntries(platform?: string): Promise<Det
         franchise: sub?.franchise
           ? { name: sub.franchise.name, status: sub.franchise.status }
           : null,
-        authorRef: sub?.authorRef
-          ? { name: sub.authorRef.name, status: sub.authorRef.status }
+        authors: (sub?.authors ?? []).map((l) => ({ name: l.author.name, status: l.author.status })),
+        authorRef: sub?.authors?.[0]
+          ? { name: sub.authors[0].author.name, status: sub.authors[0].author.status }
           : null,
 
         alternateFormats: sub?.alternateFormats.map((af) => ({

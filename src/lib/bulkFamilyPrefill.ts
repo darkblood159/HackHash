@@ -26,6 +26,7 @@ import type { MappingValues } from '@/components/MappingsSection';
 import type { SelectedFranchise } from '@/components/FranchisePicker';
 import type { SelectedAuthor } from '@/components/AuthorPicker';
 import { MAPPING_FIELD_KEYS, isCorruptedMappingValue } from './mappingFields';
+import { MAX_AUTHORS_PER_SUBMISSION } from './authorList';
 
 /** The fields that can be marked "auto-filled" in the form. */
 export type FamilyPrefillField = 'platform' | 'description' | 'tags' | 'mappings' | 'franchise' | 'author';
@@ -38,7 +39,7 @@ export interface FamilyPrefillCurrent {
   mappings: MappingValues;
   /** A franchise is already picked. */
   hasFranchise: boolean;
-  /** An Author is already picked (a carried-over plain name does NOT count — same as the single form). */
+  /** At least one Author is already picked (a carried-over plain name does NOT count — same as the single form). */
   hasAuthor: boolean;
 }
 
@@ -49,7 +50,8 @@ export interface FamilyPrefillData {
   tags?: unknown;
   gameDatabaseLinks?: unknown;
   franchise?: unknown;
-  author?: unknown;
+  /** The linked Authors in credit order (an array; anything else is ignored). */
+  authors?: unknown;
   authorName?: unknown;
 }
 
@@ -60,7 +62,8 @@ export interface FamilyPrefillPlan {
   /** The WHOLE new mappings object (current values plus the newly filled keys). */
   mappings?: MappingValues;
   franchise?: SelectedFranchise;
-  author?: SelectedAuthor;
+  /** The linked Authors in credit order — the whole list, taken from one version of the family. */
+  authors?: SelectedAuthor[];
   /** Plain-text author carried over when the family has no linked Author. */
   legacyAuthor?: string;
   /** Exactly the fields this plan fills, for the "auto-filled" markers. */
@@ -128,9 +131,17 @@ export function planFamilyPrefill(current: FamilyPrefillCurrent, data: FamilyPre
   }
 
   if (!current.hasAuthor) {
-    const author = asPicked(data.author);
-    if (author) {
-      plan.author = author;
+    // Each entry is type-checked, junk entries are dropped, repeats collapse
+    // (first wins) and the list is capped like a real submission's.
+    const authors: SelectedAuthor[] = [];
+    if (Array.isArray(data.authors)) {
+      for (const raw of data.authors) {
+        const a = asPicked(raw);
+        if (a && !authors.some((x) => x.id === a.id) && authors.length < MAX_AUTHORS_PER_SUBMISSION) authors.push(a);
+      }
+    }
+    if (authors.length > 0) {
+      plan.authors = authors;
       plan.filled.push('author');
     } else if (nonEmptyString(data.authorName)) {
       plan.legacyAuthor = data.authorName.trim();

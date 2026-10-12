@@ -31,6 +31,8 @@ import { RestoreSubmissionButton } from '@/components/RestoreSubmissionButton';
 import { AlternateFormats } from '@/components/AlternateFormats';
 import ReleaseDate from '@/components/ReleaseDate';
 import { toISODateOnly } from '@/lib/hackFamily';
+import { AUTHORS_SELECT, flattenAuthors } from '@/lib/author';
+import { AUTHOR_SEPARATOR } from '@/lib/authorList';
 import { buildRomDownloadFilename, extensionOf } from '@/lib/romExtensions';
 
 export const dynamic = 'force-dynamic';
@@ -81,7 +83,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
       gameMapping: true,
       baseRom: true,
       franchise: { select: { id: true, name: true, status: true } },
-      authorRef: { select: { id: true, name: true, status: true } },
+      authors: AUTHORS_SELECT,
       hackFamily: { select: { id: true, name: true } },
       alternateFormats: {
         orderBy: { createdAt: 'asc' },
@@ -135,6 +137,9 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
 
   const isOwner = session?.user?.id === submission.submittedBy.id;
   const isAdmin = session?.user?.role === 'ADMINISTRATOR';
+  // Linked authors in credit order (empty for a hack whose author is only
+  // plain text — then submission.author is all there is to show).
+  const linkedAuthors = flattenAuthors(submission.authors);
   const canVerify = session?.user && !isOwner && !userVerification && !['APPROVED', 'REJECTED'].includes(submission.status);
   const canManagePatch = canManagePatchFile({
     viewerId: session?.user?.id,
@@ -207,16 +212,30 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               {submission.author && (
                 <>
                   by{' '}
-                  {/* Links to every hack by this exact author name (case-insensitive) —
-                      /submissions rather than /entries so it includes hacks that
-                      aren't approved yet, this one possibly among them. */}
-                  <Link href={`/submissions?author=${encodeURIComponent(submission.author)}`} className="hover:text-phosphor hover:underline">
-                    {submission.author}
-                  </Link>
-                  {/* Same convention as the franchise badge below: a newly proposed author
-                      still awaiting admin review is usable right away, just tagged. */}
-                  {submission.authorRef?.status === 'PENDING' && (
-                    <span className="ml-1 text-[10px] text-status-pending" title="Author pending admin review">(pending)</span>
+                  {/* Each credited author links to every hack by that exact
+                      name (case-insensitive) — /submissions rather than
+                      /entries so it includes hacks that aren't approved yet,
+                      this one possibly among them. A hack with no linked
+                      authors (legacy plain text) shows its one string as a
+                      single link, exactly as before. */}
+                  {linkedAuthors.length > 0 ? (
+                    linkedAuthors.map((a, i) => (
+                      <span key={a.id}>
+                        {i > 0 && AUTHOR_SEPARATOR}
+                        <Link href={`/submissions?author=${encodeURIComponent(a.name)}`} className="hover:text-phosphor hover:underline">
+                          {a.name}
+                        </Link>
+                        {/* Same convention as the franchise badge below: a newly proposed author
+                            still awaiting admin review is usable right away, just tagged. */}
+                        {a.status === 'PENDING' && (
+                          <span className="ml-1 text-[10px] text-status-pending" title="Author pending admin review">(pending)</span>
+                        )}
+                      </span>
+                    ))
+                  ) : (
+                    <Link href={`/submissions?author=${encodeURIComponent(submission.author)}`} className="hover:text-phosphor hover:underline">
+                      {submission.author}
+                    </Link>
                   )}
                 </>
               )}
@@ -569,7 +588,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
             currentFamily={submission.hackFamily}
             currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
             currentFranchise={submission.franchise}
-            currentAuthor={submission.authorRef}
+            currentAuthors={linkedAuthors}
             currentTags={submission.tags.map((t: any) => t.tag.slug)}
             currentTranslationLanguages={submission.translationLanguages}
             initialRequests={submission.changeRequests as any}
@@ -654,7 +673,7 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
               currentFamily={submission.hackFamily}
               currentBaseRom={submission.baseRom ? { id: submission.baseRom.id, name: submission.baseRom.name, status: submission.baseRom.status, fileExtension: submission.baseRom.fileExtension } : null}
               currentFranchise={submission.franchise}
-              currentAuthor={submission.authorRef}
+              currentAuthors={linkedAuthors}
               hasOtherVersions={siblingVersions.length > 0}
               fileInfo={{
                 filename: submission.filename,
