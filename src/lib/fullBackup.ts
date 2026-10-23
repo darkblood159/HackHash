@@ -161,6 +161,7 @@ export async function generateFullBackup(
     submissionTags,
     alternateFormats,
     duplicateReports,
+    issueReports,
     screenshots,
     siteSettings,
   ] = await Promise.all([
@@ -185,6 +186,7 @@ export async function generateFullBackup(
     prisma.submissionTag.findMany(),
     prisma.alternateFormat.findMany(),
     prisma.duplicateReport.findMany(),
+    prisma.issueReport.findMany(),
     prisma.screenshot.findMany(),
     prisma.siteSetting.findMany(),
   ]);
@@ -225,6 +227,7 @@ export async function generateFullBackup(
     submissionTags: submissionTags,
     alternateFormats: alternateFormats.map((a) => ({ ...a, fileSize: a.fileSize.toString() })),
     duplicateReports: duplicateReports,
+    issueReports: issueReports,
     screenshots: screenshots,
     siteSettings: siteSettings,
   };
@@ -289,6 +292,8 @@ const RESTORE_ORDER = [
   'submissionTags',
   'alternateFormats',
   'duplicateReports',
+  // After 'submissions' and 'users' (foreign keys to both, plus resolvedBy -> users) — WIPE_ORDER is this list reversed.
+  'issueReports',
   'screenshots',
   'siteSettings',
 ] as const;
@@ -342,6 +347,7 @@ const MODEL_FOR_KEY: Record<string, string> = {
   submissionTags: 'submissionTag',
   alternateFormats: 'alternateFormat',
   duplicateReports: 'duplicateReport',
+  issueReports: 'issueReport',
   screenshots: 'screenshot',
   siteSettings: 'siteSetting',
 };
@@ -463,6 +469,7 @@ const ROW_MAPPERS: Record<string, (r: any) => any> = {
     createdAt: parseDateReq(a.createdAt),
   }),
   duplicateReports: (d) => ({ ...d, createdAt: parseDateReq(d.createdAt) }),
+  issueReports: (r) => ({ ...r, createdAt: parseDateReq(r.createdAt), resolvedAt: parseDate(r.resolvedAt) }),
   screenshots: (s) => ({ ...s, createdAt: parseDateReq(s.createdAt) }),
   siteSettings: (s) => ({ ...s, updatedAt: parseDateReq(s.updatedAt) }),
 };

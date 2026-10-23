@@ -68,6 +68,8 @@ model User {
   auditLogs        AuditLog[]
   comments         Comment[]
   duplicateReports DuplicateReport[]
+  issuesReported   IssueReport[] @relation("IssueReporter")
+  issuesResolved   IssueReport[] @relation("IssueResolver")
   changeRequestsMade     ChangeRequest[] @relation("ChangeRequestRequester")
   changeRequestsReviewed ChangeRequest[] @relation("ChangeRequestReviewer")
   baseRomsSubmitted      BaseRom[]       @relation("BaseRomSubmittedBy")
@@ -286,6 +288,8 @@ model Submission {
   comments         Comment[]
   duplicateReports DuplicateReport[] @relation("DuplicateSubmission")
   duplicateOf      DuplicateReport[] @relation("OriginalSubmission")
+  issueReports     IssueReport[]     @relation("IssueSubmission")
+  issueDuplicateOf IssueReport[]     @relation("IssueDuplicateOf")
   approvedEntry    ApprovedEntry?
   tags             SubmissionTag[]
   changeRequests   ChangeRequest[]
@@ -809,6 +813,57 @@ enum DuplicateType {
   SAME_ROM_DIFFERENT_FILENAME
   SAME_ROM_DIFFERENT_VERSION
   DIFFERENT_ROM
+}
+
+// ─── Issue Reports ────────────────────────────────────────────────────────────
+//
+// "Report issue" on an entry (replaced the old "Report as duplicate" button,
+// whose DuplicateReport rows above are left exactly as they were — historical
+// data, still shown on the entry page, still in backups). A signed-in user picks
+// the most common kind of problem and may leave a comment; every OPEN row is an
+// admin to-do, counted in the admin nav and listed at /admin/reports.
+// Type labels/hints live in src/lib/issueReports.ts (one place, shared by the
+// form, the admin queue and the API validation).
+
+enum IssueType {
+  BROKEN_LINK
+  PATCH_MISSING
+  PATCH_WONT_APPLY
+  GAME_BROKEN
+  WRONG_INFO
+  HASH_MISMATCH
+  DUPLICATE
+  INAPPROPRIATE
+  OTHER
+}
+
+enum IssueStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+model IssueReport {
+  id             String      @id @default(cuid())
+  submissionId   String
+  submission     Submission  @relation("IssueSubmission", fields: [submissionId], references: [id])
+  userId         String
+  user           User        @relation("IssueReporter", fields: [userId], references: [id])
+  type           IssueType
+  comment        String?
+  // Only meaningful for type DUPLICATE: the entry this one duplicates (optional).
+  duplicateOfId  String?
+  original       Submission? @relation("IssueDuplicateOf", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  status         IssueStatus @default(OPEN)
+  resolvedById   String?
+  resolvedBy     User?       @relation("IssueResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt     DateTime?
+  resolutionNote String?
+  createdAt      DateTime    @default(now())
+
+  @@index([status, createdAt])
+  @@index([submissionId])
+  @@index([userId])
 }
 
 // ─── Screenshots ──────────────────────────────────────────────────────────────

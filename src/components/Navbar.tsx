@@ -1,7 +1,7 @@
 'use client';
 
 // src/components/Navbar.tsx
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
@@ -23,6 +23,30 @@ export function Navbar() {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Open issue reports, for admins only: a small count on the Admin link so a
+  // new report is visible from any page, not just inside /admin. Re-fetched on
+  // navigation (cheap, one indexed count) so it drops after the admin clears
+  // reports. Silently shows nothing if the request fails.
+  const isAdmin = session?.user?.role === 'ADMINISTRATOR';
+  const [openReports, setOpenReports] = useState(0);
+  useEffect(() => {
+    if (!isAdmin) { setOpenReports(0); return; }
+    let cancelled = false;
+    fetch('/api/admin/reports/count')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (!cancelled && d && typeof d.open === 'number') setOpenReports(d.open); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isAdmin, pathname]);
+  const reportsBadge = openReports > 0 && (
+    <span
+      aria-label={`${openReports} open issue report${openReports === 1 ? '' : 's'}`}
+      className="px-1.5 py-0.5 rounded-full bg-phosphor/20 text-phosphor text-[10px] font-bold"
+    >
+      {openReports}
+    </span>
+  );
 
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-bg-base/80 backdrop-blur-md">
@@ -71,6 +95,7 @@ export function Navbar() {
               >
                 <ShieldCheck size={14} />
                 Admin
+                {reportsBadge}
               </Link>
             )}
           </nav>
@@ -149,8 +174,9 @@ export function Navbar() {
               </Link>
             ))}
             {session?.user.role === 'ADMINISTRATOR' && (
-              <Link href="/admin/submissions" onClick={() => setMobileOpen(false)} className="px-3 py-2.5 rounded-md text-sm font-medium text-text-secondary hover:bg-bg-elevated">
+              <Link href="/admin/submissions" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 px-3 py-2.5 rounded-md text-sm font-medium text-text-secondary hover:bg-bg-elevated">
                 Admin Dashboard
+                {reportsBadge}
               </Link>
             )}
             {session && (

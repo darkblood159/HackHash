@@ -28,6 +28,14 @@
 //        at again, so IDs Hasheous added afterwards (an IGDB/RetroAchievements
 //        match it hadn't made yet when we first pulled) were never noticed.
 //
+//   POST-IMPORT WAVE (checked hourly — OCT 19): Hasheous re-imports our DAT
+//   export every 7 days and then runs its daily metadata match. Once both have
+//   happened (hasheousIngestWatch.ts reads Hasheous's public task list) every
+//   already-synced entry is re-checked ONCE, WAVE_REFRESH_BATCH per hourly
+//   tick, fill-only like the routine refresh. Entries last checked before the
+//   wave became due are the ones still owed a check (`hasheousCheckedAt`), so
+//   it survives restarts and resumes where it stopped.
+//
 //   PUSH (every 30 minutes): Scans for approved entries whose GameMapping
 //   has mapping IDs but hasn't been pushed to Hasheous yet. This handles
 //   the "new data entered via UI after the last manual push" case.
@@ -43,8 +51,12 @@ import { pullMappingForSubmission, recordAcceptedPushResult, NEEDS_FIRST_SYNC_CL
 import {
   PULL_INTERVAL_MS, PUSH_INTERVAL_MS, PULL_BATCH, REFRESH_BATCH, PUSH_BATCH,
   PULL_DELAY_MS, PUSH_DELAY_MS, NOT_FOUND_RECHECK_MS, SYNCED_REFRESH_MS,
-  MAX_CONSECUTIVE_LOOKUP_ERRORS,
+  MAX_CONSECUTIVE_LOOKUP_ERRORS, WAVE_CHECK_MS, WAVE_REFRESH_BATCH,
 } from './syncConfig';
+import {
+  WAVE_SETTING_KEY, fetchHasheousSchedule, decideWave, isWaveActive, parseWaveState,
+  type WaveState,
+} from './hasheousIngestWatch';
 
 declare global {
   // eslint-disable-next-line no-var
@@ -76,7 +88,27 @@ function dueBefore(cutoff: Date): Prisma.SubmissionWhereInput {
   return { OR: [{ hasheousCheckedAt: null }, { hasheousCheckedAt: { lt: cutoff } }] };
 }
 
-export async function selectPullCandidates(env: HasheousEnv): Promise<{
+/**
+ * The "still to re-check in this post-ingest wave" filter: already-synced rows
+ * whose last definitive answer is older than the moment the wave became due.
+ * One definition, used by the scheduler AND the admin status count.
+ */
+export function waveDueWhere(readyAt: Date): Prisma.SubmissionWhereInput {
+  return {
+    status: 'APPROVED',
+    deletedAt: null,
+    gameMapping: { hasheousSyncStatus: 'ok', hasheousId: { not: null } },
+    ...dueBefore(readyAt),
+  };
+}
+
+export async function selectPullCandidates(
+  env: HasheousEnv,
+  // Set while a post-ingest wave is active: the refresh tier then re-checks
+  // everything last checked before `readyAt` (WAVE_REFRESH_BATCH at a time)
+  // instead of only rows past their own 7-day clock.
+  wave: { readyAt: Date } | null = null,
+): Promise<{
   needs: PullCandidate[];
   refresh: PullCandidate[];
 }> {
@@ -136,11 +168,11 @@ export async function selectPullCandidates(env: HasheousEnv): Promise<{
       deletedAt: null,
       id: { notIn: needs.map((n) => n.id) },
       gameMapping: { hasheousSyncStatus: 'ok', hasheousId: { not: null } },
-      ...dueBefore(refreshCutoff),
+      ...dueBefore(wave ? wave.readyAt : refreshCutoff),
     },
     select: PULL_SELECT,
     orderBy: PULL_ORDER,
-    take: REFRESH_BATCH,
+    take: wave ? WAVE_REFRESH_BATCH : REFRESH_BATCH,
   });
 
   return { needs, refresh };
@@ -163,13 +195,68 @@ async function runAutoPull() {
   }
 }
 
+// ── Post-ingest refresh wave (state lives in SiteSetting; logic in hasheousIngestWatch.ts) ──
+
+async function loadWave(): Promise<WaveState | null> {
+  try {
+    const row = await prisma.siteSetting.findUnique({ where: { key: WAVE_SETTING_KEY } });
+    return parseWaveState(row?.value);
+  } catch {
+    return null;
+  }
+}
+
+async function saveWave(w: WaveState): Promise<void> {
+  const value = JSON.stringify(w);
+  await prisma.siteSetting.upsert({
+    where: { key: WAVE_SETTING_KEY },
+    update: { value, updatedBy: 'hasheous-scheduler' },
+    create: { key: WAVE_SETTING_KEY, value, updatedBy: 'hasheous-scheduler' },
+  });
+}
+
+/**
+ * Hourly: one GET of Hasheous's public task list, advance the wave state
+ * machine, persist any change. Returns the current wave. Never throws — an
+ * unreadable answer just leaves the state as it was.
+ */
+async function refreshWave(env: HasheousEnv): Promise<WaveState | null> {
+  const prev = await loadWave();
+  const res = await fetchHasheousSchedule(getHasheousBaseUrl(env));
+  if (!res.ok) {
+    console.warn(`[hasheous/wave] couldn't read Hasheous's task list (${res.error}) — leaving wave state as is`);
+    return prev;
+  }
+  const d = decideWave(prev, res.schedule, Date.now());
+  if (d.changed && d.next) {
+    await saveWave(d.next);
+    console.log(`[hasheous/wave] ${d.reason}`);
+  }
+  return d.next;
+}
+
+/** Hourly tick: advance the wave, and if one is due, run a pull cycle (which does its batch). */
+async function runWaveWatch() {
+  if (!process.env.HASHEOUS_ENV && !process.env.HASHEOUS_API_KEY) return; // not configured
+  const wave = await refreshWave(getEnv());
+  if (isWaveActive(wave)) await runAutoPull();
+}
+
 async function runAutoPullCycle() {
   const env = getEnv();
-  const { needs, refresh } = await selectPullCandidates(env);
+  const saved = await loadWave();
+  const wave = isWaveActive(saved) ? saved : null;
+  const { needs, refresh } = await selectPullCandidates(env, wave ? { readyAt: new Date(wave.readyAt) } : null);
+  if (wave && refresh.length === 0) {
+    // Nothing left that was last checked before the wave became due: every
+    // already-synced entry has had its post-import re-check.
+    await saveWave({ ...wave, completedAt: new Date().toISOString() }).catch(console.error);
+    console.log(`[hasheous/wave] post-import re-check complete (import finished ${wave.ingestFinishedAt})`);
+  }
   const entries = [...needs, ...refresh];
 
   if (entries.length === 0) return;
-  console.log(`[hasheous/auto-pull] ${needs.length} to sync/re-check + ${refresh.length} refresh (${env})`);
+  console.log(`[hasheous/auto-pull] ${needs.length} to sync/re-check + ${refresh.length} ${wave ? 'post-import wave' : 'refresh'} (${env})`);
 
   const job = await prisma.syncJob.create({
     data: { direction: 'PULL', env, status: 'RUNNING', triggeredBy: 'SCHEDULER', total: entries.length },
@@ -362,7 +449,12 @@ export function startSyncScheduler() {
   setInterval(() => { runAutoPull().catch(console.error); }, PULL_INTERVAL_MS);
   setInterval(() => { runAutoPush().catch(console.error); }, PUSH_INTERVAL_MS);
 
+  // Post-import refresh wave: watch Hasheous's task list hourly (first look
+  // 60s after boot, so a deploy right after an import starts its wave at once).
+  setTimeout(() => { runWaveWatch().catch(console.error); }, 60000);
+  setInterval(() => { runWaveWatch().catch(console.error); }, WAVE_CHECK_MS);
+
   console.log(
-    `[hasheous] auto-sync scheduler started (pull every ${PULL_INTERVAL_MS / 3600000}h: unresolved entries re-asked every ${NOT_FOUND_RECHECK_MS / 3600000}h, synced entries refreshed every ${SYNCED_REFRESH_MS / 86400000}d; push every ${PUSH_INTERVAL_MS / 60000}min)`
+    `[hasheous] auto-sync scheduler started (pull every ${PULL_INTERVAL_MS / 3600000}h: unresolved entries re-asked every ${NOT_FOUND_RECHECK_MS / 3600000}h, synced entries refreshed every ${SYNCED_REFRESH_MS / 86400000}d, plus a full re-check after each Hasheous DAT import; push every ${PUSH_INTERVAL_MS / 60000}min)`
   );
 }

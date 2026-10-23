@@ -34,7 +34,10 @@ const ENV_URLS: Record<HasheousEnv, string> = {
 };
 
 interface AutoSyncInfo {
-  schedule: { pullEveryMs: number; recheckUnresolvedMs: number; refreshSyncedMs: number; pullBatch: number; refreshBatch: number };
+  schedule: { pullEveryMs: number; recheckUnresolvedMs: number; refreshSyncedMs: number; pullBatch: number; refreshBatch: number; waveBatch: number };
+  wave: { ingestFinishedAt: string; armedAt: string; readyAt: string | null; completedAt: string | null } | null;
+  waveRemaining: number | null;
+  hasheousImport: { state: string; lastFinishedAt: string | null; nextRunAt: string | null } | null;
   lastAutoPull: {
     startedAt: string; finishedAt: string | null; status: string; env: string;
     processed: number; found: number; updated: number; notFound: number; errorMessage: string | null;
@@ -105,7 +108,15 @@ export default function AdminHasheousPage() {
       .then((r) => r.json())
       .then((d) => {
         setApiKeySet(d.apiKeyConfigured);
-        if (d.schedule) setAutoSync({ schedule: d.schedule, lastAutoPull: d.lastAutoPull ?? null });
+        if (d.schedule) {
+          setAutoSync({
+            schedule: d.schedule,
+            lastAutoPull: d.lastAutoPull ?? null,
+            wave: d.wave ?? null,
+            waveRemaining: d.waveRemaining ?? null,
+            hasheousImport: d.hasheousImport ?? null,
+          });
+        }
         // Default to whatever HASHEOUS_ENV is set to in .env, not always beta
         if (d.env) setEnv(d.env as HasheousEnv);
       })
@@ -247,6 +258,26 @@ export default function AdminHasheousPage() {
             entries it re-checks every {humanInterval(autoSync.schedule.refreshSyncedMs)} to pick up anything Hasheous added since
             (fill-only — never overwrites or clears). Hasheous can only match a hash after it has imported a DAT containing it, and
             it keeps lookup results for up to 5 days, so a new match can take a while to show up. Use a manual pull to force it now.
+          </p>
+          <p className="text-xs text-text-secondary leading-relaxed mt-2">
+            Hasheous also re-imports HackHash's DAT export about once a week. After each import (and its daily metadata match),
+            every already-synced entry is re-checked once — up to {autoSync.schedule.waveBatch} an hour, fill-only.
+            {autoSync.hasheousImport && (
+              <>
+                {' '}Hasheous's last import finished {autoSync.hasheousImport.lastFinishedAt ? new Date(autoSync.hasheousImport.lastFinishedAt).toLocaleString() : 'never'}
+                {autoSync.hasheousImport.nextRunAt && <>; next one is due about {new Date(autoSync.hasheousImport.nextRunAt).toLocaleString()}</>}.
+              </>
+            )}
+            {' '}
+            {!autoSync.wave ? (
+              <>No import seen yet — checked hourly.</>
+            ) : autoSync.wave.completedAt ? (
+              <>Re-check for the import of {new Date(autoSync.wave.ingestFinishedAt).toLocaleString()} finished {new Date(autoSync.wave.completedAt).toLocaleString()}.</>
+            ) : autoSync.wave.readyAt ? (
+              <>Re-check for the import of {new Date(autoSync.wave.ingestFinishedAt).toLocaleString()} is running{autoSync.waveRemaining != null && <> — {autoSync.waveRemaining} entries still to check</>}.</>
+            ) : (
+              <>Import of {new Date(autoSync.wave.ingestFinishedAt).toLocaleString()} seen; waiting for Hasheous to finish matching it before re-checking.</>
+            )}
           </p>
           <p className="text-xs text-text-muted mt-2">
             {autoSync.lastAutoPull ? (

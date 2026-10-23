@@ -5,7 +5,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
-import { ShieldCheck, Users, Inbox, UploadCloud, Pencil, Globe, Layers, Disc3, Package, Settings, DatabaseBackup, Library, UserSquare2, ListPlus } from 'lucide-react';
+import { ShieldCheck, Users, Inbox, UploadCloud, Pencil, Globe, Layers, Disc3, Package, Settings, DatabaseBackup, Library, UserSquare2, ListPlus, Flag } from 'lucide-react';
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await getServerSession(authOptions);
@@ -37,6 +37,14 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   // migrate-not-applied-yet safety net).
   const pendingAuthorsCount = await prisma.author.count({ where: { status: 'PENDING' } }).catch(() => 0);
 
+  // Open "Report issue" reports — the admin's to-do count. Reports on
+  // soft-deleted entries are left out (nothing to act on). `.catch(() => 0)` for
+  // the same reason as the badges above: a nav badge must never take down the
+  // admin area (e.g. the issue_reports migration not applied yet).
+  const openReportsCount = await prisma.issueReport
+    .count({ where: { status: 'OPEN', submission: { deletedAt: null } } })
+    .catch(() => 0);
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12">
       <div className="flex items-center gap-2 mb-8">
@@ -56,6 +64,12 @@ export default async function AdminLayout({ children }: { children: React.ReactN
         </Link>
         <Link href="/admin/change-requests" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
           <Pencil size={14} /> Change requests
+        </Link>
+        <Link href="/admin/reports" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
+          <Flag size={14} /> Reports
+          {openReportsCount > 0 && (
+            <span className="px-1.5 py-0.5 rounded-full bg-phosphor/20 text-phosphor text-[10px] font-bold">{openReportsCount}</span>
+          )}
         </Link>
         <Link href="/admin/hack-families" className="px-4 py-2.5 text-sm font-medium text-text-secondary hover:text-phosphor flex items-center gap-1.5 border-b-2 border-transparent hover:border-phosphor/50 transition-colors">
           <Layers size={14} /> Hack families

@@ -50,6 +50,7 @@ const g = globalThis as unknown as {
     bulkSubmissions: Ratelimit;
     bulkPatchUpload: Ratelimit;
     bulkPrecheck: Ratelimit;
+    report: Ratelimit;
   } | null;
 };
 
@@ -167,6 +168,17 @@ const limiters =
           analytics: true,
           prefix: 'ratelimit:search',
         }),
+        // POST /api/submissions/[id]/issues ("Report issue"). Keyed by user id.
+        // Someone going through a list checking for dead links may legitimately
+        // file a handful in one sitting, so this is looser than submissions;
+        // it exists to stop a script burying the admin queue, not to ration
+        // people. Not a researched number.
+        report: new Ratelimit({
+          redis,
+          limiter: Ratelimit.slidingWindow(15, '10 m'),
+          analytics: true,
+          prefix: 'ratelimit:report',
+        }),
       }
     : null;
 
@@ -193,6 +205,10 @@ export function checkSubmissionsRateLimit(identifier: string): Promise<RateLimit
 
 export function checkVerifyRateLimit(identifier: string): Promise<RateLimitResult> {
   return check(limiters?.verify, identifier);
+}
+
+export function checkReportRateLimit(identifier: string): Promise<RateLimitResult> {
+  return check(limiters?.report, identifier);
 }
 
 export function checkSearchRateLimit(identifier: string): Promise<RateLimitResult> {

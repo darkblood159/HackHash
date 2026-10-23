@@ -26,7 +26,8 @@ import { MappingsDisplay } from '@/components/MappingsDisplay';
 import { languageName } from '@/lib/languages';
 import { ForceRepullButton } from '@/components/ForceRepullButton';
 import { HasheousSyncBadge } from '@/components/HasheousSyncBadge';
-import { DuplicateReportButton } from '@/components/DuplicateReportButton';
+import { IssueReportButton } from '@/components/IssueReportButton';
+import { issueTypeLabel } from '@/lib/issueReports';
 import { RestoreSubmissionButton } from '@/components/RestoreSubmissionButton';
 import { AlternateFormats } from '@/components/AlternateFormats';
 import ReleaseDate from '@/components/ReleaseDate';
@@ -79,6 +80,18 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
       duplicateReports: {
         include: { user: { select: { id: true, name: true, username: true } }, original: { select: { id: true, hackName: true } } },
       },
+      // Open "Report issue" reports — fetched for admins only. Reporter names
+      // and comments are admin business, deliberately NOT shown to other users
+      // (unlike the older duplicateReports panel below, which is public).
+      ...(session?.user?.role === 'ADMINISTRATOR'
+        ? {
+            issueReports: {
+              where: { status: 'OPEN' as const },
+              include: { user: { select: { id: true, name: true, username: true } } },
+              orderBy: { createdAt: 'asc' as const },
+            },
+          }
+        : {}),
       approvedEntry: true,
       gameMapping: true,
       baseRom: true,
@@ -543,6 +556,27 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
             </div>
           </div>
 
+          {/* Open issue reports (admins only) */}
+          {isAdmin && ((submission as any).issueReports?.length ?? 0) > 0 && (
+            <div className="p-5 rounded-lg border border-status-disputed/30 bg-status-disputed-bg">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-status-disputed">
+                  Open issue reports ({(submission as any).issueReports.length})
+                </h2>
+                <Link href="/admin/reports" className="text-xs text-phosphor hover:underline">Open the queue</Link>
+              </div>
+              <div className="space-y-2">
+                {(submission as any).issueReports.map((r: any) => (
+                  <div key={r.id} className="text-sm text-text-secondary">
+                    <span className="font-medium text-text-primary">{issueTypeLabel(r.type)}</span>
+                    {' '}— {r.user.name ?? r.user.username ?? 'someone'}
+                    {r.comment && <span className="block text-xs text-text-muted whitespace-pre-wrap break-words">{r.comment}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Duplicate reports */}
           {submission.duplicateReports.length > 0 && (
             <div className="p-5 rounded-lg border border-status-disputed/30 bg-status-disputed-bg">
@@ -686,9 +720,9 @@ export default async function SubmissionDetailPage({ params }: { params: { id: s
             />
           )}
 
-          {/* Report duplicate */}
+          {/* Report an issue */}
           {session?.user && !isOwner && (
-            <DuplicateReportButton submissionId={submission.id} />
+            <IssueReportButton submissionId={submission.id} />
           )}
 
           {/* Approved entry */}

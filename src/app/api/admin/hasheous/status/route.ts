@@ -2,11 +2,14 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getHasheousBaseUrl } from '@/lib/hasheous';
+import { getHasheousBaseUrl, type HasheousEnv } from '@/lib/hasheous';
 import { prisma } from '@/lib/prisma';
 import {
   PULL_INTERVAL_MS, NOT_FOUND_RECHECK_MS, SYNCED_REFRESH_MS, PULL_BATCH, REFRESH_BATCH,
+  WAVE_REFRESH_BATCH,
 } from '@/lib/syncConfig';
+import { WAVE_SETTING_KEY, fetchHasheousSchedule, isWaveActive, parseWaveState } from '@/lib/hasheousIngestWatch';
+import { waveDueWhere } from '@/lib/syncScheduler';
 
 export async function GET() {
   const session = await getServerSession(authOptions);
@@ -25,6 +28,25 @@ export async function GET() {
     },
   });
 
+  // Post-import refresh wave: persisted state, how many entries it still owes
+  // a check, and Hasheous's own view of when it last/next imports our DAT
+  // (one anonymous GET; fail-soft — the card just omits it if unreachable).
+  const env = (process.env.HASHEOUS_ENV as HasheousEnv | undefined) ?? 'beta';
+  const waveRow = await prisma.siteSetting.findUnique({ where: { key: WAVE_SETTING_KEY } }).catch(() => null);
+  const wave = parseWaveState(waveRow?.value);
+  const waveRemaining = isWaveActive(wave)
+    ? await prisma.submission.count({ where: waveDueWhere(new Date(wave.readyAt)) }).catch(() => null)
+    : null;
+  const live = await fetchHasheousSchedule(getHasheousBaseUrl(env));
+  const iso = (t: number | null | undefined) => (t != null ? new Date(t).toISOString() : null);
+  const hasheousImport = live.ok && live.schedule.ingest
+    ? {
+        state: live.schedule.ingest.state,
+        lastFinishedAt: iso(live.schedule.ingest.lastFinishTime),
+        nextRunAt: iso(live.schedule.ingest.nextRunTime),
+      }
+    : null;
+
   return NextResponse.json({
     apiKeyConfigured: !!process.env.HASHEOUS_API_KEY,
     env: process.env.HASHEOUS_ENV ?? 'beta',
@@ -36,7 +58,11 @@ export async function GET() {
       refreshSyncedMs: SYNCED_REFRESH_MS,
       pullBatch: PULL_BATCH,
       refreshBatch: REFRESH_BATCH,
+      waveBatch: WAVE_REFRESH_BATCH,
     },
+    wave,
+    waveRemaining,
+    hasheousImport,
     lastAutoPull,
   });
 }
