@@ -13,6 +13,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Search, Terminal } from 'lucide-react';
+import { DEFAULT_ENTRIES_SORT, type EntriesSort } from '@/lib/entriesSort';
 
 interface Suggestion {
   id: string;
@@ -21,7 +22,7 @@ interface Suggestion {
   submissionId: string;
 }
 
-export function EntriesSearchBox({ initialQuery, platform }: { initialQuery?: string; platform?: string }) {
+export function EntriesSearchBox({ initialQuery, platform, sort }: { initialQuery?: string; platform?: string; sort?: EntriesSort }) {
   const router = useRouter();
   const [value, setValue] = useState(initialQuery ?? '');
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -68,6 +69,9 @@ export function EntriesSearchBox({ initialQuery, platform }: { initialQuery?: st
     const params = new URLSearchParams();
     if (value.trim()) params.set('q', value.trim());
     if (platform) params.set('platform', platform);
+    // Keep the chosen sort when a new search is run (the sort dropdown sits
+    // right above this box; losing it on every search would be surprising).
+    if (sort && sort !== DEFAULT_ENTRIES_SORT) params.set('sort', sort);
     router.push(`/entries${params.toString() ? `?${params.toString()}` : ''}`);
   };
 

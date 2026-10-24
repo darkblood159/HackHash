@@ -33,6 +33,9 @@ export function PatchFilters({ current }: { current?: 'yes' | 'no' }) {
     } else {
       params.delete('hasPatch');
     }
+    // A new filter changes the result set, so staying on page 3 of the old
+    // one would land on an empty or wrong page (FranchiseFilter already did this).
+    params.delete('page');
     router.push(`${pathname}?${params.toString()}`);
   };
 

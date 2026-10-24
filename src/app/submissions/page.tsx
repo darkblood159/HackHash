@@ -2,6 +2,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { prisma } from '@/lib/prisma';
+import type { Prisma } from '@prisma/client';
 import { StatusBadge } from '@/components/ui/StatusBadge';
 import { PlatformBadge } from '@/components/ui/PlatformBadge';
 import { TagBadge } from '@/components/ui/TagBadge';
@@ -17,6 +18,20 @@ import { getFranchiseFilterOptions } from '@/lib/franchise';
 import { AUTHORS_SELECT, flattenAuthors, submissionAuthorFilter } from '@/lib/author';
 import { AuthorLinks } from '@/components/AuthorLinks';
 import { PLATFORMS } from '@/types';
+import { SubmissionsSearchBox } from '@/components/SubmissionsSearchBox';
+import { buildSubmissionSearchWhere, parseSubmissionQuery } from '@/lib/submissionSearch';
+import { SortSelect } from '@/components/SortSelect';
+import { Pagination } from '@/components/Pagination';
+import {
+  DEFAULT_SUBMISSIONS_SORT,
+  SUBMISSIONS_SORTS,
+  SUBMISSIONS_SORT_LABELS,
+  parseSubmissionsSort,
+  submissionsOrderBy,
+} from '@/lib/submissionsSort';
+import { parsePageParam, totalPagesFor } from '@/lib/pagination';
+
+const SORT_OPTIONS = SUBMISSIONS_SORTS.map((value) => ({ value, label: SUBMISSIONS_SORT_LABELS[value] }));
 
 export const dynamic = 'force-dynamic';
 
@@ -25,7 +40,7 @@ const STATUSES = ['PENDING', 'COMMUNITY_VERIFIED', 'RECOMMENDED', 'APPROVED', 'R
 export default async function SubmissionsPage({
   searchParams,
 }: {
-  searchParams: { status?: string; platform?: string; tag?: string; baseRomId?: string; hasPatch?: string; franchise?: string; author?: string };
+  searchParams: { status?: string; platform?: string; tag?: string; baseRomId?: string; hasPatch?: string; franchise?: string; author?: string; q?: string; sort?: string; page?: string };
 }) {
   const status = searchParams.status && STATUSES.includes(searchParams.status) ? searchParams.status : undefined;
   const platform = searchParams.platform && (PLATFORMS as readonly string[]).includes(searchParams.platform)
@@ -61,19 +76,40 @@ export default async function SubmissionsPage({
   // Exact (case-insensitive) author-name match — see the matching comment
   // in src/app/entries/page.tsx for why this isn't a "contains".
   const author = searchParams.author?.trim() || undefined;
+  // Free-text filter (hack name / author / base ROM / hash) — see
+  // src/lib/submissionSearch.ts. Combined with every other filter by AND.
+  const q = parseSubmissionQuery(searchParams.q);
+  // Unknown/garbled ?sort= values fall back to the default (the order this
+  // page has always used), same validate-against-a-known-set treatment as
+  // status/platform above.
+  const sort = parseSubmissionsSort(searchParams.sort);
+  const PAGE_SIZE = 50;
+
+  // Explicitly typed (not left to inference) and shared by the count and the
+  // list below, so the two can never disagree about what "matches". The
+  // annotation also keeps contextual typing on the relation filters mixed in
+  // here — see the lesson at the top of src/app/entries/page.tsx.
+  const where: Prisma.SubmissionWhereInput = {
+    deletedAt: null,
+    ...(status ? { status: status as any } : {}),
+    ...(platform ? { platform: platform as any } : {}),
+    ...(tag ? { tags: { some: { tag: { slug: tag } } } } : {}),
+    ...(baseRomFilter ? { baseRomId: baseRomFilter.id } : {}),
+    ...(franchiseFilter ? { franchiseId: franchiseFilter.id } : {}),
+    ...(author ? submissionAuthorFilter(author) : {}),
+    ...(hasPatch === 'yes' ? { patchUploadedAt: { not: null } } : {}),
+    ...(hasPatch === 'no' ? { patchUploadedAt: null } : {}),
+    ...(q ? buildSubmissionSearchWhere(q) : {}),
+  };
+
+  // Count first so a ?page= past the end (a shared link, a list that shrank
+  // since) is clamped to the last real page instead of showing an empty one.
+  const total = await prisma.submission.count({ where });
+  const totalPages = totalPagesFor(total, PAGE_SIZE);
+  const page = Math.min(parsePageParam(searchParams.page), totalPages);
 
   const submissions = await prisma.submission.findMany({
-    where: {
-      deletedAt: null,
-      ...(status ? { status: status as any } : {}),
-      ...(platform ? { platform: platform as any } : {}),
-      ...(tag ? { tags: { some: { tag: { slug: tag } } } } : {}),
-      ...(baseRomFilter ? { baseRomId: baseRomFilter.id } : {}),
-      ...(franchiseFilter ? { franchiseId: franchiseFilter.id } : {}),
-      ...(author ? submissionAuthorFilter(author) : {}),
-      ...(hasPatch === 'yes' ? { patchUploadedAt: { not: null } } : {}),
-      ...(hasPatch === 'no' ? { patchUploadedAt: null } : {}),
-    },
+    where,
     include: {
       submittedBy: { select: { id: true, name: true, image: true, username: true } },
       tags: { include: { tag: true } },
@@ -81,8 +117,9 @@ export default async function SubmissionsPage({
       authors: AUTHORS_SELECT,
       _count: { select: { verifications: true, comments: true } },
     },
-    orderBy: [{ verificationScore: 'desc' }, { createdAt: 'desc' }],
-    take: 50,
+    orderBy: submissionsOrderBy(sort),
+    skip: (page - 1) * PAGE_SIZE,
+    take: PAGE_SIZE,
   });
 
   // Manually rebuilt (rather than reading useSearchParams, which needs a
@@ -95,6 +132,8 @@ export default async function SubmissionsPage({
   if (hasPatch) clearBaseRomParams.set('hasPatch', hasPatch);
   if (franchiseFilter) clearBaseRomParams.set('franchise', franchiseFilter.id);
   if (author) clearBaseRomParams.set('author', author);
+  if (q) clearBaseRomParams.set('q', q);
+  if (sort !== DEFAULT_SUBMISSIONS_SORT) clearBaseRomParams.set('sort', sort);
   const clearBaseRomHref = `/submissions${clearBaseRomParams.toString() ? `?${clearBaseRomParams.toString()}` : ''}`;
 
   // Drops only the author filter, keeps every other active one — same
@@ -106,7 +145,27 @@ export default async function SubmissionsPage({
   if (hasPatch) clearAuthorParams.set('hasPatch', hasPatch);
   if (baseRomFilter) clearAuthorParams.set('baseRomId', baseRomFilter.id);
   if (franchiseFilter) clearAuthorParams.set('franchise', franchiseFilter.id);
+  if (q) clearAuthorParams.set('q', q);
+  if (sort !== DEFAULT_SUBMISSIONS_SORT) clearAuthorParams.set('sort', sort);
   const clearAuthorHref = `/submissions${clearAuthorParams.toString() ? `?${clearAuthorParams.toString()}` : ''}`;
+
+  // Link to page `p` with every active filter and the sort kept; page 1 is
+  // left out of the URL (same as no ?page= at all).
+  const pageHref = (p: number) => {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    if (platform) params.set('platform', platform);
+    if (tag) params.set('tag', tag);
+    if (hasPatch) params.set('hasPatch', hasPatch);
+    if (baseRomFilter) params.set('baseRomId', baseRomFilter.id);
+    if (franchiseFilter) params.set('franchise', franchiseFilter.id);
+    if (author) params.set('author', author);
+    if (q) params.set('q', q);
+    if (sort !== DEFAULT_SUBMISSIONS_SORT) params.set('sort', sort);
+    if (p > 1) params.set('page', String(p));
+    const qs = params.toString();
+    return `/submissions${qs ? `?${qs}` : ''}`;
+  };
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 py-12">
@@ -118,10 +177,12 @@ export default async function SubmissionsPage({
           </div>
           <SubmissionFilters current={status} />
         </div>
+        <SubmissionsSearchBox initialQuery={q} />
         <PlatformFilters current={platform} />
         <TagFilters current={tag} />
         <PatchFilters current={hasPatch} />
         <FranchiseFilter options={franchiseOptions} current={franchiseFilter?.id} />
+        <SortSelect current={sort} options={SORT_OPTIONS} defaultValue={DEFAULT_SUBMISSIONS_SORT} />
         {author && (
           <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-phosphor/30 bg-phosphor/5 text-xs">
             <span className="text-text-secondary">
@@ -149,8 +210,15 @@ export default async function SubmissionsPage({
 
       {submissions.length === 0 && (
         <div className="text-center py-20 border border-dashed border-border rounded-xl text-text-muted">
-          No submissions match this filter.
+          {q ? <>No submissions match &ldquo;{q}&rdquo; with these filters.</> : 'No submissions match this filter.'}
         </div>
+      )}
+
+      {total > 0 && (
+        <p className="text-xs text-text-muted mb-3">
+          Showing {((page - 1) * PAGE_SIZE + 1).toLocaleString()}–{((page - 1) * PAGE_SIZE + submissions.length).toLocaleString()} of{' '}
+          {total.toLocaleString()} submission{total === 1 ? '' : 's'}
+        </p>
       )}
 
       <div className="space-y-2">
@@ -234,6 +302,8 @@ export default async function SubmissionsPage({
           </div>
         ))}
       </div>
+
+      <Pagination page={page} totalPages={totalPages} hrefFor={pageHref} />
     </div>
   );
 }

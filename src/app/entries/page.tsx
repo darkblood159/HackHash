@@ -9,6 +9,8 @@ import { TagBadge } from '@/components/ui/TagBadge';
 import { PlatformFilters } from '@/components/PlatformFilters';
 import { PatchFilters } from '@/components/PatchFilters';
 import { EntriesSearchBox } from '@/components/EntriesSearchBox';
+import { EntriesSortSelect } from '@/components/EntriesSortSelect';
+import { DEFAULT_ENTRIES_SORT, compareGroups, parseEntriesSort, summarizeMembers } from '@/lib/entriesSort';
 import { FranchiseFilter } from '@/components/FranchiseFilter';
 import { getFranchiseFilterOptions } from '@/lib/franchise';
 import { AUTHORS_SELECT, flattenAuthors, submissionAuthorFilter } from '@/lib/author';
@@ -30,8 +32,11 @@ function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
 
-export default async function EntriesPage({ searchParams }: { searchParams: { q?: string; page?: string; platform?: string; hasPatch?: string; franchise?: string; author?: string } }) {
+export default async function EntriesPage({ searchParams }: { searchParams: { q?: string; page?: string; platform?: string; hasPatch?: string; franchise?: string; author?: string; sort?: string } }) {
   const q = searchParams.q?.trim();
+  // Unknown/garbled ?sort= values fall back to the default (name A-Z), the
+  // same validate-against-a-known-set treatment platform and hasPatch get.
+  const sort = parseEntriesSort(searchParams.sort);
   const page = Math.max(1, parseInt(searchParams.page ?? '1'));
   const platform = searchParams.platform && (PLATFORMS as readonly string[]).includes(searchParams.platform)
     ? searchParams.platform
@@ -141,6 +146,8 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
       approvedAt: true,
       submission: {
         select: {
+          // updatedAt feeds the "Recently updated" sort only (src/lib/entriesSort.ts).
+          updatedAt: true,
           hackName: true,
           author: true,
           authors: AUTHORS_SELECT,
@@ -189,9 +196,21 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
       representative,
       versionCount: members.length,
       displayName: representative.submission.hackFamily?.name ?? representative.submission.hackName,
+      // The date-based sorts look at the WHOLE family (its newest version),
+      // not just whichever version is shown as the representative.
+      ...summarizeMembers(
+        members.map((m) => ({
+          approvedAt: m.approvedAt,
+          updatedAt: m.submission.updatedAt,
+          releaseDate: m.submission.releaseDate,
+          releaseYear: m.submission.releaseYear,
+        })),
+      ),
     };
   });
-  grouped.sort((a, b) => a.displayName.localeCompare(b.displayName));
+  // 'name' (the default) is the exact comparator this line used before the
+  // sort options existed; every other option falls back to it on ties.
+  grouped.sort((a, b) => compareGroups(sort, a, b));
 
   const total = grouped.length;
   const totalPages = Math.ceil(total / perPage);
@@ -204,6 +223,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
     if (hasPatch) params.set('hasPatch', hasPatch);
     if (franchiseFilter) params.set('franchise', franchiseFilter.id);
     if (author) params.set('author', author);
+    if (sort !== DEFAULT_ENTRIES_SORT) params.set('sort', sort);
     params.set('page', String(p));
     return `/entries?${params.toString()}`;
   };
@@ -215,6 +235,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
   if (platform) clearAuthorParams.set('platform', platform);
   if (hasPatch) clearAuthorParams.set('hasPatch', hasPatch);
   if (franchiseFilter) clearAuthorParams.set('franchise', franchiseFilter.id);
+  if (sort !== DEFAULT_ENTRIES_SORT) clearAuthorParams.set('sort', sort);
   const clearAuthorHref = `/entries${clearAuthorParams.toString() ? `?${clearAuthorParams.toString()}` : ''}`;
 
   return (
@@ -240,6 +261,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
         <PlatformFilters current={platform} />
         <PatchFilters current={hasPatch} />
         <FranchiseFilter options={franchiseOptions} current={franchiseFilter?.id} />
+        <EntriesSortSelect current={sort} />
         {author && (
           <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-phosphor/30 bg-phosphor/5 text-xs">
             <span className="text-text-secondary">
@@ -252,7 +274,7 @@ export default async function EntriesPage({ searchParams }: { searchParams: { q?
         )}
       </div>
 
-      <EntriesSearchBox initialQuery={q} platform={platform} />
+      <EntriesSearchBox initialQuery={q} platform={platform} sort={sort} />
 
       {entries.length === 0 && (
         <div className="text-center py-20 border border-dashed border-border rounded-xl text-text-muted">
