@@ -18,11 +18,13 @@
 // an explicit choice there instead, never a surprise file landing in
 // their downloads folder that might be broken.
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal } from './ui/Modal';
 import { ROMProcessor } from './ROMProcessor';
 import { getCachedRom, cacheRom } from '@/lib/romCache';
-import { applyPatch, isApplySupported, PatchApplyError } from '@/lib/patchApply';
+import { isApplySupported, PatchApplyError } from '@/lib/patchApply';
+import { startPatchApply, PatchApplyCancelled } from '@/lib/patchApplyOffThread';
+import type { PatchApplyJob } from '@/lib/patchApplyClient';
 import type { PatchTypeValue } from '@/lib/patchTypes';
 import type { ROMFileInfo } from '@/types';
 import { Wrench, CheckCircle2, AlertTriangle, Loader2, Download, RotateCcw } from 'lucide-react';
@@ -77,8 +79,24 @@ export function PatchApplyButton({
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<FlowState>({ phase: 'checking-cache' });
 
+  // The patch itself runs in a Web Worker (src/workers/patchApply.worker.ts) so a
+  // big or hostile patch can't freeze the tab, which also makes it cancellable.
+  // `runIdRef` ignores any result that arrives after the run was cancelled, the
+  // modal was closed, or a newer run started; `jobRef` is the running worker job.
+  const runIdRef = useRef(0);
+  const jobRef = useRef<PatchApplyJob | null>(null);
+  const cancelRun = useCallback(() => {
+    runIdRef.current++;
+    jobRef.current?.cancel();
+    jobRef.current = null;
+  }, []);
+  // Leaving the page (or unmounting) must not leave a worker running.
+  useEffect(() => cancelRun, [cancelRun]);
+
   const runApply = useCallback(
     async (romBytes: Uint8Array, romSha1: string, usingCached: boolean) => {
+      cancelRun(); // supersede any run still going
+      const runId = runIdRef.current;
       const mismatch = romSha1.toLowerCase() !== baseRom.sha1.toLowerCase();
       setState({ phase: 'applying', usingCached, mismatch });
       try {
@@ -88,8 +106,16 @@ export function PatchApplyButton({
           throw new PatchApplyError(data.error || "Couldn't download the patch file — please try again.");
         }
         const patchBytes = new Uint8Array(await res.arrayBuffer());
-        const patchedBytes = applyPatch(patchType, patchBytes, romBytes);
+        if (runIdRef.current !== runId) return; // cancelled / closed while downloading
+        // The ROM is copied into the worker, not moved: it is also being stored in the
+        // ROM cache and must stay usable here. The freshly downloaded patch is moved.
+        const job = startPatchApply(patchType, patchBytes, romBytes, { transferPatch: true });
+        jobRef.current = job;
+        const patchedBytes = await job.promise;
+        if (runIdRef.current !== runId) return;
+        jobRef.current = null;
         const outputSha1 = await sha1HexOf(patchedBytes);
+        if (runIdRef.current !== runId) return;
         const verified = !!expectedOutput.sha1 && outputSha1.toLowerCase() === expectedOutput.sha1.toLowerCase();
         if (verified) {
           // Clean, verified result — hand it over immediately, no extra
@@ -100,6 +126,9 @@ export function PatchApplyButton({
           setState({ phase: 'done-unverified', bytes: patchedBytes });
         }
       } catch (err) {
+        // Cancelled on purpose, or a result for a run that is no longer the current one.
+        if (err instanceof PatchApplyCancelled || runIdRef.current !== runId) return;
+        jobRef.current = null;
         setState({
           phase: 'done-error',
           message:
@@ -111,7 +140,7 @@ export function PatchApplyButton({
         });
       }
     },
-    [submissionId, patchType, expectedOutput.sha1, expectedOutput.filename, baseRom.sha1]
+    [submissionId, patchType, expectedOutput.sha1, expectedOutput.filename, baseRom.sha1, cancelRun]
   );
 
   const checkCacheAndProceed = useCallback(async () => {
@@ -159,7 +188,15 @@ export function PatchApplyButton({
         Patch this ROM
       </button>
 
-      <Modal open={open} onClose={() => setOpen(false)} title="Patch your ROM" maxWidthClassName="max-w-md">
+      <Modal
+        open={open}
+        onClose={() => {
+          cancelRun(); // closing stops a patch in progress
+          setOpen(false);
+        }}
+        title="Patch your ROM"
+        maxWidthClassName="max-w-md"
+      >
         {state.phase === 'checking-cache' && (
           <p className="flex items-center gap-1.5 text-xs text-text-muted">
             <Loader2 size={12} className="animate-spin" />
@@ -190,6 +227,16 @@ export function PatchApplyButton({
               <Loader2 size={12} className="animate-spin text-phosphor" />
               Applying the patch…
             </p>
+            <button
+              type="button"
+              onClick={() => {
+                cancelRun();
+                setState({ phase: 'need-file' });
+              }}
+              className="text-xs text-text-muted hover:text-text-primary"
+            >
+              Cancel
+            </button>
           </div>
         )}
 

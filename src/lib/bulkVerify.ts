@@ -15,7 +15,8 @@
 // Nothing here leaves the browser; the base ROM and patch bytes are only ever
 // held in memory for the duration of the check.
 
-import { applyPatch, isApplySupported, PatchApplyError } from './patchApply';
+import { isApplySupported, PatchApplyError } from './patchApply';
+import { applyPatchOffThread } from './patchApplyOffThread';
 import { sha1Hex, type PatchTypeValue } from './patchTypes';
 
 export type PatchVerification =
@@ -60,7 +61,10 @@ export async function verifyPatchProducesRom(args: {
     if (!looksLikeApplicablePatch(patchType, patchBytes)) {
       return { state: 'error', detail: `This file doesn't look like a valid ${patchType} patch — it may be corrupt or mislabelled.` };
     }
-    const out = applyPatch(patchType, patchBytes, baseRomBytes);
+    // Off the main thread: a long list of patches would otherwise freeze the page one
+    // after another. The patch bytes were just read for this check, so they are moved
+    // to the worker; the base ROM is shared by every row, so it is copied.
+    const out = await applyPatchOffThread(patchType, patchBytes, baseRomBytes, { transferPatch: true });
     // sha1Hex (native crypto.subtle) rather than the JS hasher: this only
     // needs SHA-1 and runs once per row, so the fast path matters.
     const actual = await sha1Hex(new File([new Uint8Array(out)], 'patched.bin'));

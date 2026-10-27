@@ -20,6 +20,8 @@ import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { notify } from '@/lib/notifications';
+import { batchWithdrawn } from '@/lib/notificationText';
 
 export async function POST(_req: Request, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -29,7 +31,7 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
 
   const batch = await prisma.submissionBatch.findUnique({
     where: { id: params.id },
-    include: { submissions: { select: { id: true, status: true } } },
+    include: { submissions: { select: { id: true, status: true, submittedById: true } } },
   });
   if (!batch) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   if (batch.reversed) return NextResponse.json({ error: 'Already withdrawn' }, { status: 409 });
@@ -68,6 +70,13 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
   } catch (err) {
     console.error('Withdraw batch failed:', err);
     return NextResponse.json({ error: 'Withdraw failed — please try again' }, { status: 500 });
+  }
+
+  // One notification per affected person (not per entry), saying how many.
+  const perUser = new Map<string, number>();
+  for (const sub of pending) perUser.set(sub.submittedById, (perUser.get(sub.submittedById) ?? 0) + 1);
+  for (const [userId, n] of Array.from(perUser)) {
+    await notify(userId, batchWithdrawn(n, userId), { actorId: session.user.id });
   }
 
   return NextResponse.json({

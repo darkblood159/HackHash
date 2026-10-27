@@ -5,11 +5,12 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useSession, signOut } from 'next-auth/react';
-import { Search, Menu, X, Disc3, ShieldCheck, LogOut, Settings } from 'lucide-react';
+import { Search, Menu, X, Disc3, ShieldCheck, LogOut, Settings, Bell } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Avatar } from './ui/Avatar';
 import { Button } from './ui/Button';
 import { TrustBadge } from './ui/TrustBadge';
+import { NOTIFICATIONS_CHANGED_EVENT } from '@/lib/notificationText';
 
 const NAV_LINKS = [
   { href: '/entries', label: 'Database' },
@@ -39,6 +40,24 @@ export function Navbar() {
       .catch(() => {});
     return () => { cancelled = true; };
   }, [isAdmin, pathname]);
+  // Unread notifications for the signed-in user: same pattern as the admin report
+  // count above (one cheap indexed count, re-fetched on navigation, silently 0 on
+  // failure), plus an immediate re-count when the notifications page marks things read.
+  const signedIn = status === 'authenticated' && !!session?.user?.id;
+  const [unread, setUnread] = useState(0);
+  useEffect(() => {
+    if (!signedIn) { setUnread(0); return; }
+    let cancelled = false;
+    const load = () =>
+      fetch('/api/notifications/count')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => { if (!cancelled && d && typeof d.unread === 'number') setUnread(d.unread); })
+        .catch(() => {});
+    load();
+    window.addEventListener(NOTIFICATIONS_CHANGED_EVENT, load);
+    return () => { cancelled = true; window.removeEventListener(NOTIFICATIONS_CHANGED_EVENT, load); };
+  }, [signedIn, pathname]);
+  const unreadLabel = unread > 0 ? `Notifications, ${unread} unread` : 'Notifications';
   const reportsBadge = openReports > 0 && (
     <span
       aria-label={`${openReports} open issue report${openReports === 1 ? '' : 's'}`}
@@ -132,6 +151,19 @@ export function Navbar() {
                   <Avatar src={session.user.image} name={session.user.name} size={32} />
                 </Link>
                 <Link
+                  href="/notifications"
+                  title="Notifications"
+                  aria-label={unreadLabel}
+                  className="relative p-1.5 rounded-md text-text-muted hover:text-phosphor hover:bg-phosphor/10 transition-colors flex"
+                >
+                  <Bell size={15} />
+                  {unread > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-1 rounded-full bg-phosphor text-bg-base text-[10px] font-bold flex items-center justify-center">
+                      {unread > 99 ? '99+' : unread}
+                    </span>
+                  )}
+                </Link>
+                <Link
                   href="/account"
                   title="Account settings"
                   className="p-1.5 rounded-md text-text-muted hover:text-phosphor hover:bg-phosphor/10 transition-colors hidden sm:flex"
@@ -177,6 +209,20 @@ export function Navbar() {
               <Link href="/admin/submissions" onClick={() => setMobileOpen(false)} className="flex items-center gap-2 px-3 py-2.5 rounded-md text-sm font-medium text-text-secondary hover:bg-bg-elevated">
                 Admin Dashboard
                 {reportsBadge}
+              </Link>
+            )}
+            {session && (
+              <Link
+                href="/notifications"
+                onClick={() => setMobileOpen(false)}
+                className="flex items-center gap-2 px-3 py-2.5 rounded-md text-sm font-medium text-text-secondary hover:bg-bg-elevated"
+              >
+                Notifications
+                {unread > 0 && (
+                  <span aria-label={`${unread} unread`} className="px-1.5 py-0.5 rounded-full bg-phosphor/20 text-phosphor text-[10px] font-bold">
+                    {unread > 99 ? '99+' : unread}
+                  </span>
+                )}
               </Link>
             )}
             {session && (

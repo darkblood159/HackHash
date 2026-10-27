@@ -77,6 +77,7 @@ model User {
   patchUploads           Submission[]    @relation("SubmissionPatchUploadedBy")
   alternateFormatsAdded    AlternateFormat[] @relation("AlternateFormatAddedBy")
   alternateFormatsReviewed AlternateFormat[] @relation("AlternateFormatReviewedBy")
+  notifications            Notification[]
 }
 
 enum UserRole {
@@ -1225,4 +1226,33 @@ model SiteSetting {
   value     String
   updatedAt DateTime @updatedAt
   updatedBy String?
+}
+
+// In-app notifications: "your submission was approved", "your change request was
+// rejected", a comment on your hack, a report you filed being closed. Written by
+// src/lib/notifications.ts AFTER the triggering action has committed and always
+// best-effort (a failure here must never undo or fail an approval).
+//
+// Deliberately NOT part of the full backup (src/lib/fullBackup.ts): transient,
+// and userId is ON DELETE CASCADE, so a restore that wipes User rows removes
+// them without needing an entry in WIPE_ORDER (unlike the RESTRICT tables that
+// file warns about). submissionId is a plain nullable string, not a foreign key:
+// a notification must survive (as a dead link at worst) whatever happens to the
+// submission, and must never block deleting one.
+model Notification {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // One of NOTIFICATION_TYPES in src/lib/notificationText.ts. A String, not an enum,
+  // so adding a type later is a code change with no migration.
+  type         String
+  title        String
+  body         String?
+  href         String
+  submissionId String?
+  readAt       DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([userId, readAt])
 }

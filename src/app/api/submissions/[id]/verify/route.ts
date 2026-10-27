@@ -4,6 +4,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { recalculateVerificationScore, updateSubmissionStatus, getUserWeight } from '@/lib/trust';
+import { notify } from '@/lib/notifications';
+import { submissionApproved } from '@/lib/notificationText';
 import { performApprovalInTx, checkAutoApproval, canCastManualVote, VETERAN_THRESHOLD, triggerHasheousPushForSubmission, triggerHasheousPullForSubmission } from '@/lib/approval';
 import { checkVerifyRateLimit, rateLimitedResponse } from '@/lib/rateLimit';
 import { z } from 'zod';
@@ -139,6 +141,12 @@ export async function POST(
   } catch (err) {
     console.error('Verify failed:', err);
     return NextResponse.json({ error: 'Verification failed — please try again' }, { status: 500 });
+  }
+
+  // Auto-approval is how most entries get approved, so the submitter hears about it here
+  // (the tx has committed; notify() is best-effort and never throws).
+  if (autoApproved) {
+    await notify(submission.submittedById, submissionApproved({ id: params.id, hackName: submission.hackName }), { actorId: session.user.id });
   }
 
   // If auto-approval didn't fire, fall through to the existing weighted-score

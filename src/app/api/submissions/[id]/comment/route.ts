@@ -4,6 +4,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
+import { notify } from '@/lib/notifications';
+import { commentOnSubmission } from '@/lib/notificationText';
 
 const commentSchema = z.object({
   content: z.string().min(1).max(2000),
@@ -43,6 +45,9 @@ export async function POST(
       user: { select: { id: true, name: true, image: true, role: true } },
     },
   });
+
+  // Tell the submission's owner (never the commenter themself; notify() skips that).
+  await notify(submission.submittedById, commentOnSubmission({ id: submission.id, hackName: submission.hackName }, session.user.name), { actorId: session.user.id });
 
   return NextResponse.json(comment, { status: 201 });
 }

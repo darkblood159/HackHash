@@ -33,6 +33,11 @@
 //     getUserByAccount, used by src/lib/auth.ts). Deliberately never written
 //     into a downloadable backup file, which will realistically end up
 //     stored less carefully than the live database itself.
+//   - Notification: transient in-app notices ("your submission was approved").
+//     Not community data worth restoring, and Notification.userId is ON DELETE
+//     CASCADE, so the User wipe below removes them on its own - which is why it
+//     needs no entry in WIPE_ORDER, unlike the RESTRICT tables described under
+//     ChangeRequest here.
 //   - AuditLog, SyncJob: operational/history logs. Not asked for, not core
 //     to "the database" in the sense meant here (who submitted what, who
 //     verified what, who has what role/trust). AuditLog.userId/submissionId

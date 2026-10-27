@@ -1,5 +1,7 @@
 // src/lib/trust.ts
 import { prisma } from './prisma';
+import { notify } from '@/lib/notifications';
+import { submissionDisputed } from '@/lib/notificationText';
 import { TrustEventType, SubmissionStatus } from '@prisma/client';
 import { TRUST_TIER_THRESHOLDS } from '@/types';
 
@@ -115,7 +117,7 @@ export async function updateSubmissionStatus(submissionId: string, score: number
 
   const current = await prisma.submission.findUnique({
     where: { id: submissionId },
-    select: { status: true },
+    select: { status: true, submittedById: true, hackName: true },
   });
 
   if (!current) return;
@@ -150,6 +152,12 @@ export async function updateSubmissionStatus(submissionId: string, score: number
         submissionId,
       },
     });
+
+    // Only the status that means "something is wrong" is worth a notification; the
+    // Pending -> Community Verified -> Recommended ladder steps are not.
+    if (newStatus === 'DISPUTED') {
+      await notify(current.submittedById, submissionDisputed({ id: submissionId, hackName: current.hackName }));
+    }
   }
 }
 

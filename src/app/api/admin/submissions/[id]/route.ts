@@ -5,6 +5,8 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { performApprovalInTx, triggerHasheousPushForSubmission, triggerHasheousPullForSubmission } from '@/lib/approval';
 import { z } from 'zod';
+import { notify } from '@/lib/notifications';
+import { submissionApproved, submissionRejected, submissionDisputed } from '@/lib/notificationText';
 
 const actionSchema = z.object({
   action: z.enum(['APPROVE', 'REJECT', 'DISPUTE']),
@@ -69,6 +71,9 @@ export async function POST(
           auditDetails: { approvedBy: session.user.id, reason },
         });
       }, TRANSACTION_OPTS);
+
+      // Tell the submitter (after commit, best-effort: notify() never throws).
+      await notify(submission.submittedById, submissionApproved({ id: params.id, hackName: submission.hackName }), { actorId: session.user.id });
 
       // Fire-and-forget — neither blocks the response. Pull checks whether
       // Hasheous already has this hash (previously only happened on the next
@@ -141,6 +146,8 @@ export async function POST(
         });
       }, TRANSACTION_OPTS);
 
+      await notify(submission.submittedById, submissionRejected({ id: params.id, hackName: submission.hackName }), { actorId: session.user.id });
+
       return NextResponse.json({ message: 'Rejected' });
     } catch (err: any) {
       if (err?.httpStatus === 409) {
@@ -165,6 +172,8 @@ export async function POST(
         submissionId: params.id,
       },
     });
+
+    await notify(submission.submittedById, submissionDisputed({ id: params.id, hackName: submission.hackName }), { actorId: session.user.id });
 
     return NextResponse.json({ message: 'Marked as disputed' });
   }

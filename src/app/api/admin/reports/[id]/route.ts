@@ -12,6 +12,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { ISSUE_NOTE_MAX } from '@/lib/issueReports';
+import { notifyMany } from '@/lib/notifications';
+import { issueClosed } from '@/lib/notificationText';
 
 const ACTIONS = { resolve: 'RESOLVED', dismiss: 'DISMISSED', reopen: 'OPEN' } as const;
 
@@ -55,6 +57,11 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   const where = allOnEntry
     ? { submissionId: report.submissionId, status: 'OPEN' as const }
     : { id: report.id, status: { not: status } };
+  // Who is about to be told: the reporters of exactly the rows this call will close
+  // (read first, because updateMany only returns a count).
+  const toNotify = closing
+    ? await prisma.issueReport.findMany({ where, select: { userId: true } })
+    : [];
   const { count } = await prisma.issueReport.updateMany({ where, data });
   if (count === 0) {
     return NextResponse.json({ error: 'Already ' + status.toLowerCase() }, { status: 409 });
@@ -68,6 +75,13 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       submissionId: report.submissionId,
     },
   });
+
+  if (closing && toNotify.length > 0) {
+    const sub = await prisma.submission.findUnique({ where: { id: report.submissionId }, select: { id: true, hackName: true } });
+    if (sub) {
+      await notifyMany(toNotify.map((r) => r.userId), issueClosed(status === 'RESOLVED', sub), { actorId: session.user.id });
+    }
+  }
 
   return NextResponse.json({ ok: true, updated: count });
 }

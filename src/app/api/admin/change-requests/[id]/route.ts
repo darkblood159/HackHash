@@ -11,6 +11,8 @@ import { reassignSubmissionFranchise, FranchiseAssignError } from '@/lib/franchi
 import { reassignSubmissionAuthors, normalizeProposedAuthors, AuthorAssignError } from '@/lib/author';
 import { resolveMachineName, triggerHasheousPushForSubmission } from '@/lib/approval';
 import { ensureTagsExist } from '@/lib/tags';
+import { notify } from '@/lib/notifications';
+import { changeRequestDecided } from '@/lib/notificationText';
 
 const reviewSchema = z.object({
   action: z.enum(['APPROVE', 'REJECT']),
@@ -57,6 +59,7 @@ export async function POST(
         submissionId: changeRequest.submissionId,
       },
     });
+    await notify(changeRequest.requestedById, changeRequestDecided(false, { id: changeRequest.submissionId, hackName: changeRequest.submission.hackName }), { actorId: session.user.id });
     return NextResponse.json({ message: 'Rejected' });
   }
 
@@ -330,6 +333,8 @@ export async function POST(
     console.error('Change request approval failed:', err);
     return NextResponse.json({ error: 'Approval failed — please try again' }, { status: 500 });
   }
+
+  await notify(changeRequest.requestedById, changeRequestDecided(true, { id: changeRequest.submissionId, hackName: changeRequest.submission.hackName }), { actorId: session.user.id });
 
   // Push the correction out immediately rather than waiting for the 30min
   // scheduler — which, notably, would NEVER pick this up on its own if the
